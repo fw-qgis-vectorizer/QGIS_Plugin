@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/vec_plugin" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
