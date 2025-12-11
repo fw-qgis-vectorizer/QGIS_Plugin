@@ -124,13 +124,34 @@ class VecInferenceClient:
                 if progress_callback:
                     progress_callback(35, f"Processing inference job {job_id}...")
                 
-                self._poll_status(job_id, progress_callback)
+                status_response = self._poll_status(job_id, progress_callback)
+                
+                # Extract file_id from status response for download
+                file_id_for_download = None
+                if status_response and 'results' in status_response:
+                    file_id_for_download = status_response['results'].get('file_id')
+                elif status_response and 'file_id' in status_response:
+                    file_id_for_download = status_response.get('file_id')
+                
+                if not file_id_for_download:
+                    QgsMessageLog.logMessage(
+                        f"Warning: Could not extract file_id from status response. Using job_id for download.",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    file_id_for_download = job_id  # Fallback to job_id
+                
+                QgsMessageLog.logMessage(
+                    f"Using file_id '{file_id_for_download}' for download (from status response)",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
                 
                 # Step 4: Download shapefile
                 if progress_callback:
                     progress_callback(90, "Downloading results...")
                 
-                shapefile_path = self._download_shapefile(job_id)
+                shapefile_path = self._download_shapefile(file_id_for_download)
                 
                 if progress_callback:
                     progress_callback(100, "Complete!")
@@ -747,16 +768,16 @@ class VecInferenceClient:
                 )
                 raise Exception(error_msg) from e
     
-    def _download_shapefile(self, job_id):
+    def _download_shapefile(self, file_id):
         """
-        Download shapefile from /download/shapefile/{job_id} endpoint.
+        Download shapefile from /download/shapefile/{file_id} endpoint.
         
-        :param job_id: Job ID from inference service
-        :type job_id: str
+        :param file_id: File ID from upload service (used for GCS path)
+        :type file_id: str
         :returns: Path to downloaded shapefile
         :rtype: str
         """
-        download_endpoint = f"{self.service_url}/download/shapefile/{job_id}"
+        download_endpoint = f"{self.service_url}/download/shapefile/{file_id}"
         
         QgsMessageLog.logMessage(
             f"Downloading shapefile from: {download_endpoint}",
