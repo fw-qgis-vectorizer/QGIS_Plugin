@@ -393,7 +393,7 @@ class VecInferenceClient:
                         upload_endpoint,
                         files=files,
                         headers=headers,
-                        timeout=600  # 10 minute timeout for large uploads
+                        timeout=600
                     )
                     
                     elapsed_time = time.time() - start_time
@@ -528,22 +528,92 @@ class VecInferenceClient:
         
         # Call inference endpoint
         inference_endpoint = f"{self.service_url}/infer/{file_id}"
-        response = requests.post(
-            inference_endpoint,
-            params=params,
-            timeout=30
+        
+        QgsMessageLog.logMessage(
+            f"Calling inference endpoint: {inference_endpoint}",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        QgsMessageLog.logMessage(
+            f"Inference parameters: {json.dumps(params, indent=2)}",
+            "VEC Plugin",
+            Qgis.Info
         )
         
-        response.raise_for_status()
-        result = response.json()
-        
-        # Extract job_id from response
-        job_id = result.get('job_id') or result.get('jobId')
-        
-        if not job_id:
-            raise Exception(f"Inference service did not return job_id. Response: {result}")
-        
-        return job_id
+        try:
+            response = requests.post(
+                inference_endpoint,
+                params=params,
+                timeout=30
+            )
+            
+            QgsMessageLog.logMessage(
+                f"Inference response status: {response.status_code}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            QgsMessageLog.logMessage(
+                f"Inference response headers: {dict(response.headers)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            QgsMessageLog.logMessage(
+                f"Inference response text (first 500 chars): {response.text[:500]}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            QgsMessageLog.logMessage(
+                f"Inference response JSON: {json.dumps(result, indent=2)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            # Extract job_id from response
+            job_id = result.get('job_id') or result.get('jobId')
+            
+            if not job_id:
+                raise Exception(f"Inference service did not return job_id. Response: {result}")
+            
+            QgsMessageLog.logMessage(
+                f"Inference started successfully, job_id: {job_id}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            return job_id
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Inference request failed: {str(e)}"
+            QgsMessageLog.logMessage(
+                error_msg,
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            if hasattr(e, 'response') and e.response is not None:
+                QgsMessageLog.logMessage(
+                    f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
+                    "VEC Plugin",
+                    Qgis.Critical
+                )
+            raise Exception(error_msg) from e
+        except Exception as e:
+            error_msg = f"Inference error: {str(e)}"
+            QgsMessageLog.logMessage(
+                error_msg,
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            import traceback
+            QgsMessageLog.logMessage(
+                f"Traceback: {traceback.format_exc()}",
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            raise Exception(error_msg) from e
     
     def _poll_status(self, job_id, progress_callback=None, poll_interval=5, max_wait_time=3600):
         """
@@ -561,34 +631,121 @@ class VecInferenceClient:
         status_endpoint = f"{self.service_url}/status/{job_id}"
         start_time = time.time()
         
+        QgsMessageLog.logMessage(
+            f"Starting status polling for job_id: {job_id}",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        QgsMessageLog.logMessage(
+            f"Status endpoint: {status_endpoint}",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        QgsMessageLog.logMessage(
+            f"Poll interval: {poll_interval}s, Max wait time: {max_wait_time}s",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        
+        poll_count = 0
         while True:
-            response = requests.get(status_endpoint, timeout=30)
-            response.raise_for_status()
-            status_data = response.json()
+            poll_count += 1
             
-            status = status_data.get('status', 'unknown')
-            progress = status_data.get('progress', 0)
-            message = status_data.get('message', 'Processing...')
-            
-            # Update progress callback
-            if progress_callback:
-                # Map service progress (0-100) to our range (40-90)
-                mapped_progress = 40 + int(progress * 0.5)  # 40-90 range
-                progress_callback(mapped_progress, message)
-            
-            if status == 'completed':
-                return status_data
-            elif status == 'failed':
-                error_msg = status_data.get('message', 'Processing failed')
-                raise Exception(f"Inference job failed: {error_msg}")
-            
-            # Check timeout
-            elapsed = time.time() - start_time
-            if elapsed > max_wait_time:
-                raise Exception(f"Inference job timed out after {max_wait_time} seconds")
-            
-            # Wait before next poll
-            time.sleep(poll_interval)
+            try:
+                QgsMessageLog.logMessage(
+                    f"Polling status (attempt {poll_count}): {status_endpoint}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                
+                response = requests.get(status_endpoint, timeout=30)
+                
+                QgsMessageLog.logMessage(
+                    f"Status poll {poll_count} response status: {response.status_code}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                
+                response.raise_for_status()
+                status_data = response.json()
+                
+                status = status_data.get('status', 'unknown')
+                progress = status_data.get('progress', 0)
+                message = status_data.get('message', 'Processing...')
+                
+                QgsMessageLog.logMessage(
+                    f"Status poll {poll_count}: status={status}, progress={progress}, message={message}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                
+                # Log full response for debugging (first poll and final status)
+                if poll_count == 1 or status in ['completed', 'failed']:
+                    QgsMessageLog.logMessage(
+                        f"Status response JSON: {json.dumps(status_data, indent=2)}",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+                
+                # Update progress callback
+                if progress_callback:
+                    # Map service progress (0-100) to our range (40-90)
+                    mapped_progress = 40 + int(progress * 0.5)  # 40-90 range
+                    progress_callback(mapped_progress, message)
+                
+                if status == 'completed':
+                    elapsed = time.time() - start_time
+                    QgsMessageLog.logMessage(
+                        f"Job {job_id} completed successfully after {elapsed:.1f} seconds ({poll_count} polls)",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+                    return status_data
+                elif status == 'failed':
+                    error_msg = status_data.get('message', 'Processing failed')
+                    QgsMessageLog.logMessage(
+                        f"Job {job_id} failed: {error_msg}",
+                        "VEC Plugin",
+                        Qgis.Critical
+                    )
+                    raise Exception(f"Inference job failed: {error_msg}")
+                
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > max_wait_time:
+                    raise Exception(f"Inference job timed out after {max_wait_time} seconds")
+                
+                # Wait before next poll
+                time.sleep(poll_interval)
+                
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Status poll {poll_count} failed: {str(e)}"
+                QgsMessageLog.logMessage(
+                    error_msg,
+                    "VEC Plugin",
+                    Qgis.Critical
+                )
+                if hasattr(e, 'response') and e.response is not None:
+                    QgsMessageLog.logMessage(
+                        f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
+                        "VEC Plugin",
+                        Qgis.Critical
+                    )
+                raise Exception(error_msg) from e
+            except Exception as e:
+                error_msg = f"Status polling error: {str(e)}"
+                QgsMessageLog.logMessage(
+                    error_msg,
+                    "VEC Plugin",
+                    Qgis.Critical
+                )
+                import traceback
+                QgsMessageLog.logMessage(
+                    f"Traceback: {traceback.format_exc()}",
+                    "VEC Plugin",
+                    Qgis.Critical
+                )
+                raise Exception(error_msg) from e
     
     def _download_shapefile(self, job_id):
         """
@@ -601,26 +758,106 @@ class VecInferenceClient:
         """
         download_endpoint = f"{self.service_url}/download/shapefile/{job_id}"
         
-        response = requests.get(download_endpoint, timeout=300, stream=True)
-        response.raise_for_status()
+        QgsMessageLog.logMessage(
+            f"Downloading shapefile from: {download_endpoint}",
+            "VEC Plugin",
+            Qgis.Info
+        )
         
-        # Create temporary directory for shapefile
-        temp_dir = tempfile.mkdtemp()
-        zip_path = os.path.join(temp_dir, 'result.zip')
-        
-        # Download ZIP file
-        with open(zip_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        # Extract ZIP file
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(temp_dir)
-        
-        # Find .shp file in extracted contents
-        shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
-        if shp_files:
-            return os.path.join(temp_dir, shp_files[0])
-        else:
-            raise Exception("No shapefile (.shp) found in downloaded ZIP")
+        try:
+            response = requests.get(download_endpoint, timeout=300, stream=True)
+            
+            QgsMessageLog.logMessage(
+                f"Download response status: {response.status_code}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            QgsMessageLog.logMessage(
+                f"Download response headers: {dict(response.headers)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            response.raise_for_status()
+            
+            # Create temporary directory for shapefile
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, 'result.zip')
+            
+            QgsMessageLog.logMessage(
+                f"Downloading ZIP to: {zip_path}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            # Download ZIP file
+            with open(zip_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            zip_size = os.path.getsize(zip_path)
+            QgsMessageLog.logMessage(
+                f"Downloaded ZIP file: {zip_path} (size: {zip_size} bytes)",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            # Extract ZIP file
+            QgsMessageLog.logMessage(
+                f"Extracting ZIP file...",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            
+            # Find .shp file in extracted contents
+            shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
+            
+            QgsMessageLog.logMessage(
+                f"Extracted files: {os.listdir(temp_dir)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            if shp_files:
+                shp_path = os.path.join(temp_dir, shp_files[0])
+                QgsMessageLog.logMessage(
+                    f"Found shapefile: {shp_path}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                return shp_path
+            else:
+                raise Exception("No shapefile (.shp) found in downloaded ZIP")
+                
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Download request failed: {str(e)}"
+            QgsMessageLog.logMessage(
+                error_msg,
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            if hasattr(e, 'response') and e.response is not None:
+                QgsMessageLog.logMessage(
+                    f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
+                    "VEC Plugin",
+                    Qgis.Critical
+                )
+            raise Exception(error_msg) from e
+        except Exception as e:
+            error_msg = f"Download error: {str(e)}"
+            QgsMessageLog.logMessage(
+                error_msg,
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            import traceback
+            QgsMessageLog.logMessage(
+                f"Traceback: {traceback.format_exc()}",
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            raise Exception(error_msg) from e
 
