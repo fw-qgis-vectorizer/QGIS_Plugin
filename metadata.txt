@@ -3,7 +3,7 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=vec_plugin
+name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
 description=Integration with VEC inference service for building detection
 version=0.1

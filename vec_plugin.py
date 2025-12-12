@@ -21,9 +21,9 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QThread, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QDialogButtonBox, QDialog
 from qgis.core import (
     QgsVectorLayer, QgsProject, QgsMessageLog, 
     Qgis
@@ -35,7 +35,6 @@ from .resources import *
 from .vec_plugin_dialog import VecPluginDialog
 from .vec_inference_client import VecInferenceClient
 import os.path
-import json
 import tempfile
 
 
@@ -54,20 +53,8 @@ class InferenceWorker(QThread):
     
     def run(self):
         try:
-            QgsMessageLog.logMessage(
-                "InferenceWorker.run() started",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             def progress_callback(value, message):
                 self.progress.emit(value, message)
-            
-            QgsMessageLog.logMessage(
-                f"Calling process_raster_layer with layer: {self.raster_layer.name()}",
-                "VEC Plugin",
-                Qgis.Info
-            )
             
             shapefile_path = self.client.process_raster_layer(
                 self.raster_layer,
@@ -75,21 +62,8 @@ class InferenceWorker(QThread):
                 self.crop_geometry
             )
             
-            QgsMessageLog.logMessage(
-                f"Process completed successfully, shapefile: {shapefile_path}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             self.finished.emit(shapefile_path)
         except Exception as e:
-            import traceback
-            error_msg = f"InferenceWorker error: {str(e)}\n{traceback.format_exc()}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
             self.error.emit(str(e))
 
 
@@ -122,7 +96,7 @@ class VecPlugin:
 
         # Declare instance attributes
         self.actions = []
-        self.menu = self.tr(u'&vec_plugin')
+        self.menu = self.tr(u'&FieldWatch Vectorizer')
 
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
@@ -236,7 +210,7 @@ class VecPlugin:
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
             self.iface.removePluginMenu(
-                self.tr(u'&vec_plugin'),
+                self.tr(u'&FieldWatch Vectorizer'),
                 action)
             self.iface.removeToolBarIcon(action)
 
@@ -253,168 +227,121 @@ class VecPlugin:
         # Populate layers in case new layers were added
         self.dlg.populate_layers()
         
-        # show the dialog
+        # Reset processing flag
+        self._is_processing = False
+        
+        # Connect to processing_started signal (disconnect first to avoid duplicates)
+        try:
+            self.dlg.processing_started.disconnect()
+        except:
+            pass
+        self.dlg.processing_started.connect(self._start_processing)
+        
+        # show the dialog (non-modal so it stays open during processing)
         self.dlg.show()
         # Run the dialog event loop
-        result = self.dlg.exec_()
+        self.dlg.exec_()
+    
+    def _start_processing(self):
+        """Start the inference processing."""
+        # Prevent multiple simultaneous processing
+        if hasattr(self, '_is_processing') and self._is_processing:
+            return
         
-        QgsMessageLog.logMessage(
-            f"Dialog closed with result: {result} (1=Accepted/OK, 0=Rejected/Cancel)",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        
-        QgsMessageLog.logMessage(
-            f"Dialog result: {result}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        
-        # See if OK was pressed
-        if result:
+        try:
+            self._is_processing = True
+            
+            # Disconnect signal to prevent restart
             try:
-                QgsMessageLog.logMessage(
-                    "OK button clicked, starting processing...",
-                    "VEC Plugin",
-                    Qgis.Info
+                self.dlg.processing_started.disconnect()
+            except:
+                pass
+            
+            # Get values from dialog
+            input_layer = self.dlg.get_input_layer()
+            output_name = self.dlg.get_output_layer_name()
+            crop_geometry = self.dlg.get_crop_geometry()
+            
+            if not input_layer:
+                self.iface.messageBar().pushMessage(
+                    "Error", 
+                    "Please select an input raster layer.",
+                    level=1,  # Warning level
+                    duration=3
                 )
-                
-                # Get values from dialog
-                input_layer = self.dlg.get_input_layer()
-                output_name = self.dlg.get_output_layer_name()
-                crop_geometry = self.dlg.get_crop_geometry()
-                
-                QgsMessageLog.logMessage(
-                    f"Retrieved values - input_layer: {input_layer}, output_name: {output_name}, crop_geometry: {crop_geometry is not None}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-                if not input_layer:
-                    QgsMessageLog.logMessage(
-                        "No input layer selected",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    self.iface.messageBar().pushMessage(
-                        "Error", 
-                        "Please select an input raster layer.",
-                        level=1,  # Warning level
-                        duration=3
-                    )
-                    return
-                
-                # Validate polygon is drawn (mandatory)
-                if not crop_geometry or crop_geometry.isEmpty():
-                    QgsMessageLog.logMessage(
-                        "No polygon drawn - polygon is required",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    self.iface.messageBar().pushMessage(
-                        "Error",
-                        "Please draw a polygon on the map before processing.",
-                        level=1,
-                        duration=5
-                    )
-                    return
-                
-                # Hardcoded service URLs
-                INFERENCE_SERVICE_URL = "https://inference-service-proxy-127864475088.us-central1.run.app"
-                UPLOAD_SERVICE_URL = "https://upload-service-127864475088.us-central1.run.app"
-                
-                QgsMessageLog.logMessage(
-                    f"Initializing inference client with URLs: inference={INFERENCE_SERVICE_URL}, upload={UPLOAD_SERVICE_URL}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-                # Initialize inference client with hardcoded URLs
-                try:
-                    client = VecInferenceClient(INFERENCE_SERVICE_URL, upload_url=UPLOAD_SERVICE_URL)
-                    QgsMessageLog.logMessage(
-                        "Inference client initialized successfully",
-                        "VEC Plugin",
-                        Qgis.Info
-                    )
-                except Exception as e:
-                    QgsMessageLog.logMessage(
-                        f"Failed to initialize inference client: {str(e)}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    import traceback
-                    QgsMessageLog.logMessage(
-                        f"Traceback: {traceback.format_exc()}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    self.iface.messageBar().pushMessage(
-                        "Error",
-                        f"Failed to initialize inference client: {str(e)}",
-                        level=2,
-                        duration=5
-                    )
-                    return
-                
-                # Show progress bar
-                self.dlg.progressBar.setVisible(True)
-                self.dlg.progressBar.setValue(0)
-                self.dlg.statusLabel.setText("Processing...")
-                
-                QgsMessageLog.logMessage(
-                    "Creating worker thread...",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-                # Create worker thread
-                self.worker = InferenceWorker(client, input_layer, crop_geometry)
-                self.worker.progress.connect(self._on_progress)
-                self.worker.finished.connect(lambda shapefile_path: self._on_finished(shapefile_path, output_name, input_layer))
-                self.worker.error.connect(self._on_error)
-                
-                QgsMessageLog.logMessage(
-                    "Starting worker thread...",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-                self.worker.start()
-                
-                QgsMessageLog.logMessage(
-                    "Worker thread started",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-            except Exception as e:
-                QgsMessageLog.logMessage(
-                    f"Unexpected error in run() method: {str(e)}",
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-                import traceback
-                QgsMessageLog.logMessage(
-                    f"Traceback: {traceback.format_exc()}",
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
+                return
+            
+            # Validate polygon is drawn (mandatory)
+            if not crop_geometry or crop_geometry.isEmpty():
                 self.iface.messageBar().pushMessage(
                     "Error",
-                    f"Unexpected error: {str(e)}",
+                    "Please draw a polygon on the map before processing.",
+                    level=1,
+                    duration=5
+                )
+                return
+            
+            # Hardcoded service URLs
+            INFERENCE_SERVICE_URL = "https://inference-service-proxy-127864475088.us-central1.run.app"
+            UPLOAD_SERVICE_URL = "https://upload-service-127864475088.us-central1.run.app"
+            
+            # Initialize inference client with hardcoded URLs
+            try:
+                client = VecInferenceClient(INFERENCE_SERVICE_URL, upload_url=UPLOAD_SERVICE_URL)
+            except Exception as e:
+                self.iface.messageBar().pushMessage(
+                    "Error",
+                    "Failed to initialize inference client",
                     level=2,
                     duration=5
                 )
+                return
+            
+            # Disable OK/Cancel buttons during processing
+            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
+            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
+            if ok_button:
+                ok_button.setEnabled(False)
+            if cancel_button:
+                cancel_button.setEnabled(False)
+            
+            # Show progress bar
+            self.dlg.progressBar.setVisible(True)
+            self.dlg.progressBar.setValue(0)
+            self.dlg.statusLabel.setText("Processing...")
+            
+            # Store output_name and input_layer for use in callbacks
+            self._processing_output_name = output_name
+            self._processing_input_layer = input_layer
+            
+            # Create worker thread
+            self.worker = InferenceWorker(client, input_layer, crop_geometry)
+            self.worker.progress.connect(self._on_progress)
+            self.worker.finished.connect(self._on_finished)
+            self.worker.error.connect(self._on_error)
+            
+            self.worker.start()
+            
+        except Exception as e:
+            self._is_processing = False
+            self.iface.messageBar().pushMessage(
+                "Error",
+                "Unexpected error occurred",
+                level=2,
+                duration=5
+            )
     
     def _on_progress(self, value, message):
         """Update progress bar."""
         self.dlg.progressBar.setValue(value)
         self.dlg.statusLabel.setText(message)
     
-    def _on_finished(self, shapefile_path, output_name, input_layer):
+    def _on_finished(self, shapefile_path):
         """Handle successful inference completion."""
         try:
+            output_name = self._processing_output_name
+            input_layer = self._processing_input_layer
+            
             # Create vector layer from shapefile
             vector_layer = self._create_vector_layer(shapefile_path, output_name, input_layer.crs())
             
@@ -438,24 +365,43 @@ class VecPlugin:
             self.dlg.progressBar.setVisible(False)
             self.dlg.statusLabel.setText("Complete!")
             
+            # Re-enable buttons
+            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
+            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
+            if ok_button:
+                ok_button.setEnabled(True)
+            if cancel_button:
+                cancel_button.setEnabled(True)
+            
+            # Reset processing flag
+            self._is_processing = False
+            
+            # Close dialog after a short delay (use done() to avoid triggering accept() signal)
+            QtCore.QTimer.singleShot(1000, lambda: self.dlg.done(QDialog.Accepted))
+            
         except Exception as e:
+            self._is_processing = False
             self._on_error(str(e))
     
     def _on_error(self, error_message):
         """Handle inference errors."""
+        self._is_processing = False
         self.dlg.progressBar.setVisible(False)
         self.dlg.statusLabel.setText("Error occurred")
         self.iface.messageBar().pushMessage(
             "Error",
-            f"Inference failed: {error_message}",
+            "Inference failed",
             level=2,  # Critical
             duration=5
         )
-        QgsMessageLog.logMessage(
-            f"Inference error: {error_message}",
-            "VEC Plugin",
-            Qgis.Critical
-        )
+        
+        # Re-enable buttons
+        ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
+        cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
+        if ok_button:
+            ok_button.setEnabled(True)
+        if cancel_button:
+            cancel_button.setEnabled(True)
     
     def _create_vector_layer(self, shapefile_path, layer_name, crs):
         """

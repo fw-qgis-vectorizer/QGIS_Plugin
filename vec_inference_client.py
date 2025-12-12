@@ -23,7 +23,6 @@ import requests
 import tempfile
 import os
 import time
-import json
 import zipfile
 from qgis.core import (
     QgsMessageLog, Qgis, QgsRasterPipe, 
@@ -46,13 +45,6 @@ class VecInferenceClient:
         self.service_url = service_url.rstrip('/')
         # If upload_url not provided, assume upload service is at same base URL
         self.upload_url = (upload_url.rstrip('/') if upload_url else service_url.rstrip('/'))
-        
-        # Log initialization
-        QgsMessageLog.logMessage(
-            f"VecInferenceClient initialized - service_url: {self.service_url}, upload_url: {self.upload_url}",
-            "VEC Plugin",
-            Qgis.Info
-        )
     
     def process_raster_layer(self, raster_layer, progress_callback=None, crop_geometry=None):
         """
@@ -77,6 +69,11 @@ class VecInferenceClient:
                 progress_callback(5, "Cropping raster to selected area...")
             
             raster_layer = self._crop_raster(raster_layer, crop_geometry)
+            QgsMessageLog.logMessage(
+                "Raster cropped, compressing for upload...",
+                "VEC Plugin",
+                Qgis.Info
+            )
             
             # Export raster to temporary file with hardcoded compression (first compression)
             if progress_callback:
@@ -86,11 +83,10 @@ class VecInferenceClient:
             
             # Verify temp file was created
             if not os.path.exists(temp_file):
-                raise Exception(f"Temporary file was not created: {temp_file}")
+                raise Exception("Temporary file was not created")
             
-            temp_file_size = os.path.getsize(temp_file)
             QgsMessageLog.logMessage(
-                f"Compression complete: {temp_file} (size: {temp_file_size} bytes)",
+                "Raster compressed and uploading for processing...",
                 "VEC Plugin",
                 Qgis.Info
             )
@@ -100,20 +96,19 @@ class VecInferenceClient:
                 if progress_callback:
                     progress_callback(15, "Uploading raster for processing...")
                 
+                file_id = self._upload_to_gcs(temp_file)
                 QgsMessageLog.logMessage(
-                    f"Starting upload process for file: {temp_file}",
+                    "Cropped raster uploaded, now processing...",
                     "VEC Plugin",
                     Qgis.Info
                 )
-                
-                file_id = self._upload_to_gcs(temp_file)
                 
                 if not file_id:
                     raise Exception("Failed to get file_id from upload service")
                 
                 # Step 2: Call /infer/{file_id} endpoint
                 if progress_callback:
-                    progress_callback(25, f"Starting inference for file {file_id}...")
+                    progress_callback(25, "Starting inference...")
                 
                 job_id = self._start_inference(file_id)
                 
@@ -122,9 +117,15 @@ class VecInferenceClient:
                 
                 # Step 3: Poll for status until complete
                 if progress_callback:
-                    progress_callback(35, f"Processing inference job {job_id}...")
+                    progress_callback(35, "Processing inference...")
                 
                 status_response = self._poll_status(job_id, progress_callback)
+                
+                QgsMessageLog.logMessage(
+                    "Processing complete! Pulling shapefile...",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
                 
                 # Extract file_id from status response for download
                 file_id_for_download = None
@@ -134,24 +135,19 @@ class VecInferenceClient:
                     file_id_for_download = status_response.get('file_id')
                 
                 if not file_id_for_download:
-                    QgsMessageLog.logMessage(
-                        f"Warning: Could not extract file_id from status response. Using job_id for download.",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
                     file_id_for_download = job_id  # Fallback to job_id
-                
-                QgsMessageLog.logMessage(
-                    f"Using file_id '{file_id_for_download}' for download (from status response)",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
                 
                 # Step 4: Download shapefile
                 if progress_callback:
                     progress_callback(90, "Downloading results...")
                 
                 shapefile_path = self._download_shapefile(file_id_for_download)
+                
+                QgsMessageLog.logMessage(
+                    "Shapefile downloaded successfully",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
                 
                 if progress_callback:
                     progress_callback(100, "Complete!")
@@ -211,12 +207,7 @@ class VecInferenceClient:
             
             result = processing.run("gdal:translate", params)
             return result['OUTPUT']
-        except Exception as e:
-            QgsMessageLog.logMessage(
-                f"Processing export failed, using fallback: {str(e)}",
-                "VEC Plugin",
-                Qgis.Warning
-            )
+        except Exception:
             # Fallback to direct export (without compression)
             provider = raster_layer.dataProvider()
             pipe = QgsRasterPipe()
@@ -313,12 +304,6 @@ class VecInferenceClient:
                     
             except Exception as e:
                 # Fallback to extent-based clipping
-                QgsMessageLog.logMessage(
-                    f"Mask clipping failed, using extent: {str(e)}",
-                    "VEC Plugin",
-                    Qgis.Warning
-                )
-                
                 params = {
                     'INPUT': raster_layer,
                     'PROJWIN': extent,
@@ -333,12 +318,7 @@ class VecInferenceClient:
                 else:
                     raise Exception("Failed to create cropped raster layer")
                     
-        except Exception as e:
-            QgsMessageLog.logMessage(
-                f"Error cropping raster: {str(e)}",
-                "VEC Plugin",
-                Qgis.Warning
-            )
+        except Exception:
             # Return original layer if cropping fails
             return raster_layer
     
@@ -352,64 +332,20 @@ class VecInferenceClient:
         :rtype: str
         """
         try:
-            # Log the upload attempt
-            file_size = os.path.getsize(image_path) if os.path.exists(image_path) else 0
-            QgsMessageLog.logMessage(
-                f"Attempting upload to: {self.upload_url}/upload",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            QgsMessageLog.logMessage(
-                f"Uploading file: {image_path} (size: {file_size} bytes)",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             upload_endpoint = f"{self.upload_url}/upload"
-            QgsMessageLog.logMessage(
-                f"Full upload endpoint URL: {upload_endpoint}",
-                "VEC Plugin",
-                Qgis.Info
-            )
             
             # Open file and prepare for upload
-            # Read file with explicit filename to ensure proper multipart encoding
             file_name = os.path.basename(image_path)
             with open(image_path, 'rb') as f:
                 files = {
                     'file': (file_name, f, 'application/octet-stream')
                 }
                 
-                QgsMessageLog.logMessage(
-                    f"Sending POST request to: {upload_endpoint}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                QgsMessageLog.logMessage(
-                    f"File details - name: {file_name}, size: {file_size} bytes",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-                # Add some headers that might help
                 headers = {
                     'User-Agent': 'QGIS-VEC-Plugin/1.0'
                 }
                 
                 try:
-                    QgsMessageLog.logMessage(
-                        f"About to send POST request (file size: {file_size} bytes, ~{file_size/1024/1024:.1f} MB)...",
-                        "VEC Plugin",
-                        Qgis.Info
-                    )
-                    QgsMessageLog.logMessage(
-                        f"Upload may take several minutes for large files. Timeout set to 600 seconds.",
-                        "VEC Plugin",
-                        Qgis.Info
-                    )
-                    
-                    start_time = time.time()
-                    
                     response = requests.post(
                         upload_endpoint,
                         files=files,
@@ -417,109 +353,28 @@ class VecInferenceClient:
                         timeout=600
                     )
                     
-                    elapsed_time = time.time() - start_time
-                    QgsMessageLog.logMessage(
-                        f"POST request completed in {elapsed_time:.1f} seconds, received response",
-                        "VEC Plugin",
-                        Qgis.Info
-                    )
-                    
-                except requests.exceptions.ConnectionError as e:
-                    QgsMessageLog.logMessage(
-                        f"Connection error - server might be unreachable: {str(e)}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    raise
-                except requests.exceptions.Timeout as e:
-                    QgsMessageLog.logMessage(
-                        f"Upload timeout after 600 seconds: {str(e)}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    raise
+                except requests.exceptions.ConnectionError:
+                    raise Exception("Connection error - server unreachable")
+                except requests.exceptions.Timeout:
+                    raise Exception("Upload timeout after 600 seconds")
                 except requests.exceptions.RequestException as e:
-                    QgsMessageLog.logMessage(
-                        f"Request exception: {type(e).__name__}: {str(e)}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    raise
-                except Exception as e:
-                    QgsMessageLog.logMessage(
-                        f"Unexpected error during POST request: {type(e).__name__}: {str(e)}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    import traceback
-                    QgsMessageLog.logMessage(
-                        f"Traceback: {traceback.format_exc()}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                    raise
-                
-                QgsMessageLog.logMessage(
-                    f"Upload response status: {response.status_code}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                QgsMessageLog.logMessage(
-                    f"Upload response headers: {dict(response.headers)}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                QgsMessageLog.logMessage(
-                    f"Upload response text (first 500 chars): {response.text[:500]}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
+                    raise Exception(f"Upload request failed: {str(e)}")
                 
                 response.raise_for_status()
                 result = response.json()
-                
-                QgsMessageLog.logMessage(
-                    f"Upload response JSON: {json.dumps(result, indent=2)}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
                 
                 # Extract file_id from response
                 file_id = result.get('file_id') or result.get('id') or result.get('fileId')
                 
                 if not file_id:
-                    raise Exception(f"Upload service did not return file_id. Response: {result}")
-                
-                QgsMessageLog.logMessage(
-                    f"Upload successful, file_id: {file_id}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
+                    raise Exception("Upload service did not return file_id")
                 
                 return file_id
                 
         except requests.exceptions.RequestException as e:
-            error_msg = f"Upload request failed: {str(e)}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            if hasattr(e, 'response') and e.response is not None:
-                QgsMessageLog.logMessage(
-                    f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-            raise Exception(error_msg) from e
+            raise Exception("Upload request failed") from e
         except Exception as e:
-            error_msg = f"Upload error: {str(e)}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            raise Exception(error_msg) from e
+            raise Exception("Upload error") from e
     
     def _start_inference(self, file_id, prompt="building", confidence=0.3, alpha=0.5, 
                         iou_threshold=0.15, remove_overlaps=True, overlap_method="clip"):
@@ -550,17 +405,6 @@ class VecInferenceClient:
         # Call inference endpoint
         inference_endpoint = f"{self.service_url}/infer/{file_id}"
         
-        QgsMessageLog.logMessage(
-            f"Calling inference endpoint: {inference_endpoint}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        QgsMessageLog.logMessage(
-            f"Inference parameters: {json.dumps(params, indent=2)}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        
         try:
             response = requests.post(
                 inference_endpoint,
@@ -568,73 +412,21 @@ class VecInferenceClient:
                 timeout=30
             )
             
-            QgsMessageLog.logMessage(
-                f"Inference response status: {response.status_code}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            QgsMessageLog.logMessage(
-                f"Inference response headers: {dict(response.headers)}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            QgsMessageLog.logMessage(
-                f"Inference response text (first 500 chars): {response.text[:500]}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             response.raise_for_status()
             result = response.json()
-            
-            QgsMessageLog.logMessage(
-                f"Inference response JSON: {json.dumps(result, indent=2)}",
-                "VEC Plugin",
-                Qgis.Info
-            )
             
             # Extract job_id from response
             job_id = result.get('job_id') or result.get('jobId')
             
             if not job_id:
-                raise Exception(f"Inference service did not return job_id. Response: {result}")
-            
-            QgsMessageLog.logMessage(
-                f"Inference started successfully, job_id: {job_id}",
-                "VEC Plugin",
-                Qgis.Info
-            )
+                raise Exception("Inference service did not return job_id")
             
             return job_id
             
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Inference request failed: {str(e)}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            if hasattr(e, 'response') and e.response is not None:
-                QgsMessageLog.logMessage(
-                    f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-            raise Exception(error_msg) from e
-        except Exception as e:
-            error_msg = f"Inference error: {str(e)}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            import traceback
-            QgsMessageLog.logMessage(
-                f"Traceback: {traceback.format_exc()}",
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            raise Exception(error_msg) from e
+        except requests.exceptions.RequestException:
+            raise Exception("Inference request failed")
+        except Exception:
+            raise Exception("Inference error")
     
     def _poll_status(self, job_id, progress_callback=None, poll_interval=5, max_wait_time=3600):
         """
@@ -652,61 +444,18 @@ class VecInferenceClient:
         status_endpoint = f"{self.service_url}/status/{job_id}"
         start_time = time.time()
         
-        QgsMessageLog.logMessage(
-            f"Starting status polling for job_id: {job_id}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        QgsMessageLog.logMessage(
-            f"Status endpoint: {status_endpoint}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        QgsMessageLog.logMessage(
-            f"Poll interval: {poll_interval}s, Max wait time: {max_wait_time}s",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        
         poll_count = 0
         while True:
             poll_count += 1
             
             try:
-                QgsMessageLog.logMessage(
-                    f"Polling status (attempt {poll_count}): {status_endpoint}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
                 response = requests.get(status_endpoint, timeout=30)
-                
-                QgsMessageLog.logMessage(
-                    f"Status poll {poll_count} response status: {response.status_code}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
                 response.raise_for_status()
                 status_data = response.json()
                 
                 status = status_data.get('status', 'unknown')
                 progress = status_data.get('progress', 0)
                 message = status_data.get('message', 'Processing...')
-                
-                QgsMessageLog.logMessage(
-                    f"Status poll {poll_count}: status={status}, progress={progress}, message={message}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                
-                # Log full response for debugging (first poll and final status)
-                if poll_count == 1 or status in ['completed', 'failed']:
-                    QgsMessageLog.logMessage(
-                        f"Status response JSON: {json.dumps(status_data, indent=2)}",
-                        "VEC Plugin",
-                        Qgis.Info
-                    )
                 
                 # Update progress callback
                 if progress_callback:
@@ -715,20 +464,9 @@ class VecInferenceClient:
                     progress_callback(mapped_progress, message)
                 
                 if status == 'completed':
-                    elapsed = time.time() - start_time
-                    QgsMessageLog.logMessage(
-                        f"Job {job_id} completed successfully after {elapsed:.1f} seconds ({poll_count} polls)",
-                        "VEC Plugin",
-                        Qgis.Info
-                    )
                     return status_data
                 elif status == 'failed':
                     error_msg = status_data.get('message', 'Processing failed')
-                    QgsMessageLog.logMessage(
-                        f"Job {job_id} failed: {error_msg}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
                     raise Exception(f"Inference job failed: {error_msg}")
                 
                 # Check timeout
@@ -739,34 +477,10 @@ class VecInferenceClient:
                 # Wait before next poll
                 time.sleep(poll_interval)
                 
-            except requests.exceptions.RequestException as e:
-                error_msg = f"Status poll {poll_count} failed: {str(e)}"
-                QgsMessageLog.logMessage(
-                    error_msg,
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-                if hasattr(e, 'response') and e.response is not None:
-                    QgsMessageLog.logMessage(
-                        f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
-                        "VEC Plugin",
-                        Qgis.Critical
-                    )
-                raise Exception(error_msg) from e
+            except requests.exceptions.RequestException:
+                raise Exception("Status polling failed")
             except Exception as e:
-                error_msg = f"Status polling error: {str(e)}"
-                QgsMessageLog.logMessage(
-                    error_msg,
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-                import traceback
-                QgsMessageLog.logMessage(
-                    f"Traceback: {traceback.format_exc()}",
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-                raise Exception(error_msg) from e
+                raise Exception("Status polling error") from e
     
     def _download_shapefile(self, file_id):
         """
@@ -779,106 +493,34 @@ class VecInferenceClient:
         """
         download_endpoint = f"{self.service_url}/download/shapefile/{file_id}"
         
-        QgsMessageLog.logMessage(
-            f"Downloading shapefile from: {download_endpoint}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        
         try:
             response = requests.get(download_endpoint, timeout=300, stream=True)
-            
-            QgsMessageLog.logMessage(
-                f"Download response status: {response.status_code}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            QgsMessageLog.logMessage(
-                f"Download response headers: {dict(response.headers)}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             response.raise_for_status()
             
             # Create temporary directory for shapefile
             temp_dir = tempfile.mkdtemp()
             zip_path = os.path.join(temp_dir, 'result.zip')
             
-            QgsMessageLog.logMessage(
-                f"Downloading ZIP to: {zip_path}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             # Download ZIP file
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
-            zip_size = os.path.getsize(zip_path)
-            QgsMessageLog.logMessage(
-                f"Downloaded ZIP file: {zip_path} (size: {zip_size} bytes)",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             # Extract ZIP file
-            QgsMessageLog.logMessage(
-                f"Extracting ZIP file...",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir)
             
             # Find .shp file in extracted contents
             shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
             
-            QgsMessageLog.logMessage(
-                f"Extracted files: {os.listdir(temp_dir)}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
             if shp_files:
                 shp_path = os.path.join(temp_dir, shp_files[0])
-                QgsMessageLog.logMessage(
-                    f"Found shapefile: {shp_path}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
                 return shp_path
             else:
                 raise Exception("No shapefile (.shp) found in downloaded ZIP")
                 
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Download request failed: {str(e)}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            if hasattr(e, 'response') and e.response is not None:
-                QgsMessageLog.logMessage(
-                    f"Response status: {e.response.status_code}, Response text: {e.response.text[:500]}",
-                    "VEC Plugin",
-                    Qgis.Critical
-                )
-            raise Exception(error_msg) from e
-        except Exception as e:
-            error_msg = f"Download error: {str(e)}"
-            QgsMessageLog.logMessage(
-                error_msg,
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            import traceback
-            QgsMessageLog.logMessage(
-                f"Traceback: {traceback.format_exc()}",
-                "VEC Plugin",
-                Qgis.Critical
-            )
-            raise Exception(error_msg) from e
+        except requests.exceptions.RequestException:
+            raise Exception("Download request failed")
+        except Exception:
+            raise Exception("Download error")
 

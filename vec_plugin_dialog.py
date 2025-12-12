@@ -91,6 +91,8 @@ class PolygonCaptureTool(QgsMapToolCapture):
 class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     # Signal emitted when polygon is drawn
     polygon_drawn = QtCore.pyqtSignal(QgsGeometry)
+    # Signal emitted when OK is clicked (but dialog stays open)
+    processing_started = QtCore.pyqtSignal()
     
     def __init__(self, parent=None, iface=None):
         """Constructor."""
@@ -249,7 +251,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             ok_button.setEnabled(False)
     
     def accept(self):
-        """Override accept to validate polygon is drawn."""
+        """Override accept to validate polygon is drawn and emit signal instead of closing."""
         if not self.crop_geometry or self.crop_geometry.isEmpty():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -258,8 +260,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             return
         
-        # Call parent accept to close dialog
-        super(VecPluginDialog, self).accept()
+        # Emit signal to start processing (dialog stays open)
+        self.processing_started.emit()
         
         # Restore previous map tool if drawing was active
         if self.map_tool and self.iface:

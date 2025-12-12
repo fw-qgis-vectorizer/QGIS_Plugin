@@ -10,7 +10,7 @@
    </rect>
   </property>
   <property name="windowTitle" >
-   <string>VEC Inference - Building Detection</string>
+   <string>FieldWatch - Vectorization</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -154,4 +154,4 @@
    <slot>reject()</slot>
   </connection>
  </connections>
-</ui>#
+</ui>
