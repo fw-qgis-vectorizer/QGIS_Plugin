@@ -33,7 +33,7 @@ from qgis.core import (
 class VecInferenceClient:
     """Client for communicating with VEC inference service."""
     
-    def __init__(self, service_url, upload_url=None):
+    def __init__(self, service_url, upload_url=None, jwt_token=None):
         """
         Initialize the inference client.
         
@@ -41,10 +41,59 @@ class VecInferenceClient:
         :type service_url: str
         :param upload_url: URL of the upload service (if different from inference service)
         :type upload_url: str
+        :param jwt_token: JWT token for authentication
+        :type jwt_token: str
         """
         self.service_url = service_url.rstrip('/')
         # If upload_url not provided, assume upload service is at same base URL
         self.upload_url = (upload_url.rstrip('/') if upload_url else service_url.rstrip('/'))
+        self.jwt_token = jwt_token
+    
+    def validate_license_key(self, license_key):
+        """
+        Validate license key and get JWT token.
+        
+        :param license_key: License key to validate
+        :type license_key: str
+        :returns: Tuple of (jwt_token, expiry_timestamp) or (None, None) if invalid
+        :rtype: tuple
+        """
+        auth_endpoint = f"{self.service_url}/auth/validate"
+        
+        try:
+            response = requests.post(
+                auth_endpoint,
+                json={"license_key": license_key},
+                timeout=10
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get('valid') and result.get('token'):
+                token = result['token']
+                expiry = result.get('expires_at')
+                self.jwt_token = token  # Store token in client
+                return token, expiry
+            
+            return None, None
+            
+        except requests.exceptions.RequestException as e:
+            QgsMessageLog.logMessage(
+                f"License validation failed: {str(e)}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            return None, None
+    
+    def _get_auth_headers(self):
+        """Get headers with JWT token if available."""
+        headers = {
+            'User-Agent': 'QGIS-VEC-Plugin/1.0'
+        }
+        if self.jwt_token:
+            headers['Authorization'] = f'Bearer {self.jwt_token}'
+        return headers
     
     def process_raster_layer(self, raster_layer, progress_callback=None, crop_geometry=None):
         """
@@ -341,9 +390,7 @@ class VecInferenceClient:
                     'file': (file_name, f, 'application/octet-stream')
                 }
                 
-                headers = {
-                    'User-Agent': 'QGIS-VEC-Plugin/1.0'
-                }
+                headers = self._get_auth_headers()
                 
                 try:
                     response = requests.post(
@@ -406,9 +453,11 @@ class VecInferenceClient:
         inference_endpoint = f"{self.service_url}/infer/{file_id}"
         
         try:
+            headers = self._get_auth_headers()
             response = requests.post(
                 inference_endpoint,
                 params=params,
+                headers=headers,
                 timeout=30
             )
             
@@ -449,7 +498,17 @@ class VecInferenceClient:
             poll_count += 1
             
             try:
-                response = requests.get(status_endpoint, timeout=30)
+                headers = self._get_auth_headers()
+                
+                # Log polling attempt (but not every single poll to avoid spam)
+                if poll_count == 1 or poll_count % 10 == 0:
+                    QgsMessageLog.logMessage(
+                        f"Polling status (attempt {poll_count}): {status_endpoint}",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+                
+                response = requests.get(status_endpoint, headers=headers, timeout=30)
                 response.raise_for_status()
                 status_data = response.json()
                 
@@ -477,10 +536,59 @@ class VecInferenceClient:
                 # Wait before next poll
                 time.sleep(poll_interval)
                 
-            except requests.exceptions.RequestException:
-                raise Exception("Status polling failed")
+            except requests.exceptions.HTTPError as e:
+                # Handle HTTP errors (401, 403, 404, 500, etc.)
+                status_code = e.response.status_code if e.response else None
+                error_detail = ""
+                try:
+                    if e.response:
+                        error_detail = e.response.text[:200]  # First 200 chars
+                except:
+                    pass
+                
+                # Log the error for debugging
+                QgsMessageLog.logMessage(
+                    f"Status polling HTTP error ({status_code}) on attempt {poll_count}: {str(e)}. Details: {error_detail}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                
+                if status_code == 401:
+                    raise Exception(f"Authentication failed (401). JWT token may be invalid or expired. Error: {str(e)}")
+                elif status_code == 404:
+                    raise Exception(f"Job not found (404). Job ID: {job_id}. Error: {str(e)}")
+                elif status_code == 403:
+                    raise Exception(f"Access forbidden (403). License may be invalid. Error: {str(e)}")
+                else:
+                    raise Exception(f"Status polling HTTP error ({status_code}): {str(e)}. Details: {error_detail}")
+            except requests.exceptions.ConnectionError as e:
+                QgsMessageLog.logMessage(
+                    f"Status polling connection error on attempt {poll_count}: {str(e)}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Status polling connection error - server unreachable: {str(e)}")
+            except requests.exceptions.Timeout as e:
+                QgsMessageLog.logMessage(
+                    f"Status polling timeout on attempt {poll_count}: {str(e)}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Status polling timeout after 30 seconds: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                QgsMessageLog.logMessage(
+                    f"Status polling request error on attempt {poll_count}: {str(e)}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Status polling request failed: {str(e)}")
             except Exception as e:
-                raise Exception("Status polling error") from e
+                QgsMessageLog.logMessage(
+                    f"Status polling unexpected error on attempt {poll_count}: {str(e)}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Status polling error: {str(e)}") from e
     
     def _download_shapefile(self, file_id):
         """
@@ -494,7 +602,8 @@ class VecInferenceClient:
         download_endpoint = f"{self.service_url}/download/shapefile/{file_id}"
         
         try:
-            response = requests.get(download_endpoint, timeout=300, stream=True)
+            headers = self._get_auth_headers()
+            response = requests.get(download_endpoint, headers=headers, timeout=300, stream=True)
             response.raise_for_status()
             
             # Create temporary directory for shapefile

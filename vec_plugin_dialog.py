@@ -109,6 +109,11 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
         
+        # Initialize license-related variables
+        self.license_key = None
+        self.jwt_token = None
+        self.token_expiry = None
+        
         # Populate the input layer combo box with raster layers
         self.populate_layers()
         
@@ -122,10 +127,13 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.drawPolygonButton.clicked.connect(self.start_polygon_drawing)
         self.clearPolygonButton.clicked.connect(self.clear_polygon)
         
+        # Connect license validation button
+        self.validateLicenseButton.clicked.connect(self.validate_license)
+        
         # Connect signal
         self.polygon_drawn.connect(self.on_polygon_drawn)
         
-        # Disable OK button initially - polygon must be drawn first
+        # Disable OK button initially - polygon must be drawn first AND license must be validated
         ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
         if ok_button:
             ok_button.setEnabled(False)
@@ -163,6 +171,85 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     def get_crop_geometry(self):
         """Get the crop polygon geometry."""
         return self.crop_geometry
+    
+    def get_license_key(self):
+        """Get the license key."""
+        return self.license_key
+    
+    def get_jwt_token(self):
+        """Get the JWT token."""
+        return self.jwt_token
+    
+    def validate_license(self):
+        """Validate license key and get JWT token."""
+        license_key = self.licenseKeyLineEdit.text().strip()
+        
+        if not license_key:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "License Required",
+                "Please enter a license key."
+            )
+            return
+        
+        # Disable button during validation
+        self.validateLicenseButton.setEnabled(False)
+        self.validateLicenseButton.setText("Validating...")
+        self.licenseStatusLabel.setText("Validating...")
+        self.licenseStatusLabel.setStyleSheet("color: blue;")
+        
+        # Call validation endpoint
+        try:
+            from .vec_inference_client import VecInferenceClient
+            # Use hardcoded service URL for auth endpoint
+            INFERENCE_SERVICE_URL = "https://inference-service-proxy-127864475088.us-central1.run.app"
+            temp_client = VecInferenceClient(INFERENCE_SERVICE_URL)
+            token, expiry = temp_client.validate_license_key(license_key)
+            
+            if token:
+                self.jwt_token = token
+                self.token_expiry = expiry
+                self.license_key = license_key
+                self.licenseStatusLabel.setText("✓ Valid")
+                self.licenseStatusLabel.setStyleSheet("color: green;")
+                
+                # Enable OK button if polygon is drawn
+                ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
+                if ok_button and self.crop_geometry:
+                    ok_button.setEnabled(True)
+            else:
+                self.jwt_token = None
+                self.token_expiry = None
+                self.license_key = None
+                self.licenseStatusLabel.setText("✗ Invalid")
+                self.licenseStatusLabel.setStyleSheet("color: red;")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid License",
+                    "The license key is invalid or expired."
+                )
+                # Disable OK button
+                ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
+                if ok_button:
+                    ok_button.setEnabled(False)
+        except Exception as e:
+            self.jwt_token = None
+            self.token_expiry = None
+            self.license_key = None
+            self.licenseStatusLabel.setText("✗ Error")
+            self.licenseStatusLabel.setStyleSheet("color: red;")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Validation Error",
+                f"Failed to validate license: {str(e)}"
+            )
+            # Disable OK button
+            ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
+            if ok_button:
+                ok_button.setEnabled(False)
+        finally:
+            self.validateLicenseButton.setEnabled(True)
+            self.validateLicenseButton.setText("Validate")
     
     def start_polygon_drawing(self):
         """Start polygon drawing on the map canvas."""
@@ -232,9 +319,9 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             self.clearPolygonButton.setEnabled(True)
             self.drawPolygonButton.setEnabled(True)
             
-            # Enable OK button now that polygon is drawn
+            # Enable OK button now that polygon is drawn (only if license is validated)
             ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
-            if ok_button:
+            if ok_button and self.jwt_token:
                 ok_button.setEnabled(True)
     
     def clear_polygon(self):
@@ -251,7 +338,15 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             ok_button.setEnabled(False)
     
     def accept(self):
-        """Override accept to validate polygon is drawn and emit signal instead of closing."""
+        """Override accept to validate polygon is drawn and license is validated, then emit signal instead of closing."""
+        if not self.jwt_token:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "License Required",
+                "Please validate your license key before proceeding.\n\nEnter your license key and click 'Validate'."
+            )
+            return
+        
         if not self.crop_geometry or self.crop_geometry.isEmpty():
             QtWidgets.QMessageBox.warning(
                 self,

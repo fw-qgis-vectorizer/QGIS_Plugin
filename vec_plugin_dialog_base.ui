@@ -14,6 +14,50 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
+    <widget class="QGroupBox" name="licenseGroupBox">
+     <property name="title">
+      <string>License</string>
+     </property>
+     <layout class="QFormLayout" name="licenseFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="licenseKeyLabel">
+        <property name="text">
+         <string>License Key:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <layout class="QHBoxLayout" name="licenseKeyLayout">
+        <item>
+         <widget class="QLineEdit" name="licenseKeyLineEdit">
+          <property name="placeholderText">
+           <string>Enter your license key</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="validateLicenseButton">
+          <property name="text">
+           <string>Validate</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="licenseStatusLabel">
+        <property name="text">
+         <string>Not validated</string>
+        </property>
+        <property name="styleSheet">
+         <string>color: gray;</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="QGroupBox" name="inputGroupBox">
      <property name="title">
       <string>Input Settings</string>

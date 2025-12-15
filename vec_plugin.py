@@ -261,6 +261,18 @@ class VecPlugin:
             input_layer = self.dlg.get_input_layer()
             output_name = self.dlg.get_output_layer_name()
             crop_geometry = self.dlg.get_crop_geometry()
+            jwt_token = self.dlg.get_jwt_token()
+            
+            # Validate license is validated
+            if not jwt_token:
+                self.iface.messageBar().pushMessage(
+                    "Error",
+                    "Please validate your license key before processing.",
+                    level=1,
+                    duration=5
+                )
+                self._is_processing = False
+                return
             
             if not input_layer:
                 self.iface.messageBar().pushMessage(
@@ -269,6 +281,7 @@ class VecPlugin:
                     level=1,  # Warning level
                     duration=3
                 )
+                self._is_processing = False
                 return
             
             # Validate polygon is drawn (mandatory)
@@ -279,15 +292,16 @@ class VecPlugin:
                     level=1,
                     duration=5
                 )
+                self._is_processing = False
                 return
             
             # Hardcoded service URLs
             INFERENCE_SERVICE_URL = "https://inference-service-proxy-127864475088.us-central1.run.app"
             UPLOAD_SERVICE_URL = "https://upload-service-127864475088.us-central1.run.app"
             
-            # Initialize inference client with hardcoded URLs
+            # Initialize inference client with hardcoded URLs and JWT token
             try:
-                client = VecInferenceClient(INFERENCE_SERVICE_URL, upload_url=UPLOAD_SERVICE_URL)
+                client = VecInferenceClient(INFERENCE_SERVICE_URL, upload_url=UPLOAD_SERVICE_URL, jwt_token=jwt_token)
             except Exception as e:
                 self.iface.messageBar().pushMessage(
                     "Error",
@@ -295,6 +309,7 @@ class VecPlugin:
                     level=2,
                     duration=5
                 )
+                self._is_processing = False
                 return
             
             # Disable OK/Cancel buttons during processing
