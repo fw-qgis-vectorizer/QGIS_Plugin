@@ -24,6 +24,7 @@ import tempfile
 import os
 import time
 import zipfile
+import re
 from qgis.core import (
     QgsMessageLog, Qgis, QgsRasterPipe, 
     QgsRasterFileWriter, QgsRasterLayer, QgsGeometry
@@ -32,6 +33,37 @@ from qgis.core import (
 
 class VecInferenceClient:
     """Client for communicating with VEC inference service."""
+    
+    @staticmethod
+    def _sanitize_urls(text):
+        """
+        Remove URLs from text to prevent exposing internal endpoints in logs.
+        Handles HTTP/HTTPS URLs, storage URLs (GCS, S3, Azure), and file paths.
+        
+        :param text: Text that may contain URLs
+        :type text: str
+        :returns: Text with URLs removed
+        :rtype: str
+        """
+        if not text:
+            return text
+        
+        text_str = str(text)
+        
+        # Pattern to match HTTP/HTTPS URLs
+        http_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+        text_str = re.sub(http_pattern, '', text_str)
+        
+        # Pattern to match storage URLs (gs://, s3://, azure://, etc.)
+        storage_pattern = r'(gs|s3|azure|gcs)://[^\s<>"{}|\\^`\[\]]+'
+        text_str = re.sub(storage_pattern, '', text_str, flags=re.IGNORECASE)
+        
+        # Clean up extra spaces and colons left behind
+        text_str = re.sub(r'\s+', ' ', text_str)  # Multiple spaces to single space
+        text_str = re.sub(r'\s*:\s*', ': ', text_str)  # Clean up colons
+        text_str = text_str.strip()
+        
+        return text_str
     
     def __init__(self, service_url, upload_url=None, jwt_token=None):
         """
@@ -80,7 +112,7 @@ class VecInferenceClient:
             
         except requests.exceptions.RequestException as e:
             QgsMessageLog.logMessage(
-                f"License validation failed: {str(e)}",
+                "License validation failed",
                 "VEC Plugin",
                 Qgis.Warning
             )
@@ -210,7 +242,7 @@ class VecInferenceClient:
             
         except Exception as e:
             QgsMessageLog.logMessage(
-                f"Error processing raster: {str(e)}",
+                f"Error processing raster: {self._sanitize_urls(str(e))}",
                 "VEC Plugin",
                 Qgis.Critical
             )
@@ -405,7 +437,7 @@ class VecInferenceClient:
                 except requests.exceptions.Timeout:
                     raise Exception("Upload timeout after 600 seconds")
                 except requests.exceptions.RequestException as e:
-                    raise Exception(f"Upload request failed: {str(e)}")
+                    raise Exception("Upload request failed")
                 
                 response.raise_for_status()
                 result = response.json()
@@ -494,6 +526,9 @@ class VecInferenceClient:
         start_time = time.time()
         
         poll_count = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 3  # Allow up to 3 consecutive errors before giving up
+        
         while True:
             poll_count += 1
             
@@ -503,14 +538,17 @@ class VecInferenceClient:
                 # Log polling attempt (but not every single poll to avoid spam)
                 if poll_count == 1 or poll_count % 10 == 0:
                     QgsMessageLog.logMessage(
-                        f"Polling status (attempt {poll_count}): {status_endpoint}",
+                        f"Polling status (attempt {poll_count})",
                         "VEC Plugin",
                         Qgis.Info
                     )
                 
-                response = requests.get(status_endpoint, headers=headers, timeout=30)
+                response = requests.get(status_endpoint, headers=headers, timeout=120)
                 response.raise_for_status()
                 status_data = response.json()
+                
+                # Reset error counter on successful request
+                consecutive_errors = 0
                 
                 status = status_data.get('status', 'unknown')
                 progress = status_data.get('progress', 0)
@@ -546,49 +584,89 @@ class VecInferenceClient:
                 except:
                     pass
                 
-                # Log the error for debugging
+                # Log the error for debugging (sanitize URLs)
                 QgsMessageLog.logMessage(
-                    f"Status polling HTTP error ({status_code}) on attempt {poll_count}: {str(e)}. Details: {error_detail}",
+                    f"Status polling HTTP error ({status_code}) on attempt {poll_count}: {self._sanitize_urls(str(e))}. Details: {self._sanitize_urls(error_detail)}",
                     "VEC Plugin",
                     Qgis.Warning
                 )
                 
-                if status_code == 401:
-                    raise Exception(f"Authentication failed (401). JWT token may be invalid or expired. Error: {str(e)}")
-                elif status_code == 404:
-                    raise Exception(f"Job not found (404). Job ID: {job_id}. Error: {str(e)}")
-                elif status_code == 403:
-                    raise Exception(f"Access forbidden (403). License may be invalid. Error: {str(e)}")
-                else:
-                    raise Exception(f"Status polling HTTP error ({status_code}): {str(e)}. Details: {error_detail}")
-            except requests.exceptions.ConnectionError as e:
+                # Non-retryable errors (auth, not found, forbidden)
+                if status_code in (401, 403, 404):
+                    if status_code == 401:
+                        raise Exception(f"Authentication failed (401). JWT token may be invalid or expired.")
+                    elif status_code == 404:
+                        raise Exception(f"Job not found (404). Job ID: {job_id}.")
+                    elif status_code == 403:
+                        raise Exception(f"Access forbidden (403). License may be invalid.")
+                
+                # Retryable HTTP errors (500, 502, 503, 504)
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    raise Exception(f"Status polling HTTP error ({status_code}) after {max_consecutive_errors} attempts.")
+                
+                # Exponential backoff: wait 2^consecutive_errors seconds
+                wait_time = min(2 ** consecutive_errors, 30)  # Cap at 30 seconds
                 QgsMessageLog.logMessage(
-                    f"Status polling connection error on attempt {poll_count}: {str(e)}",
+                    f"Retrying after {wait_time} seconds (error {consecutive_errors}/{max_consecutive_errors})",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                time.sleep(wait_time)
+                continue
+                
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # Retryable network errors
+                consecutive_errors += 1
+                error_type = "timeout" if isinstance(e, requests.exceptions.Timeout) else "connection"
+                
+                QgsMessageLog.logMessage(
+                    f"Status polling {error_type} error on attempt {poll_count} (error {consecutive_errors}/{max_consecutive_errors}): {self._sanitize_urls(str(e))}",
                     "VEC Plugin",
                     Qgis.Warning
                 )
-                raise Exception(f"Status polling connection error - server unreachable: {str(e)}")
-            except requests.exceptions.Timeout as e:
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    if isinstance(e, requests.exceptions.Timeout):
+                        raise Exception(f"Status polling timeout after {max_consecutive_errors} attempts.")
+                    else:
+                        raise Exception(f"Status polling connection error after {max_consecutive_errors} attempts - server unreachable.")
+                
+                # Exponential backoff: wait 2^consecutive_errors seconds
+                wait_time = min(2 ** consecutive_errors, 30)  # Cap at 30 seconds
                 QgsMessageLog.logMessage(
-                    f"Status polling timeout on attempt {poll_count}: {str(e)}",
+                    f"Retrying after {wait_time} seconds (error {consecutive_errors}/{max_consecutive_errors})",
                     "VEC Plugin",
-                    Qgis.Warning
+                    Qgis.Info
                 )
-                raise Exception(f"Status polling timeout after 30 seconds: {str(e)}")
+                time.sleep(wait_time)
+                continue
+                
             except requests.exceptions.RequestException as e:
+                # Other request exceptions - retry a few times
+                consecutive_errors += 1
                 QgsMessageLog.logMessage(
-                    f"Status polling request error on attempt {poll_count}: {str(e)}",
+                    f"Status polling request error on attempt {poll_count} (error {consecutive_errors}/{max_consecutive_errors}): {self._sanitize_urls(str(e))}",
                     "VEC Plugin",
                     Qgis.Warning
                 )
-                raise Exception(f"Status polling request failed: {str(e)}")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    raise Exception(f"Status polling request failed after {max_consecutive_errors} attempts.")
+                
+                # Exponential backoff
+                wait_time = min(2 ** consecutive_errors, 30)
+                time.sleep(wait_time)
+                continue
+                
             except Exception as e:
+                # Unexpected errors - don't retry
                 QgsMessageLog.logMessage(
-                    f"Status polling unexpected error on attempt {poll_count}: {str(e)}",
+                    f"Status polling unexpected error on attempt {poll_count}: {self._sanitize_urls(str(e))}",
                     "VEC Plugin",
                     Qgis.Warning
                 )
-                raise Exception(f"Status polling error: {str(e)}") from e
+                raise Exception(f"Status polling error: {self._sanitize_urls(str(e))}") from e
     
     def _download_shapefile(self, file_id):
         """

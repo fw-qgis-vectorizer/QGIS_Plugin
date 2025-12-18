@@ -338,12 +338,38 @@ class VecPlugin:
             self.worker.start()
             
         except Exception as e:
+            # Clean up any partially created worker
+            if hasattr(self, 'worker') and self.worker:
+                try:
+                    self.worker.progress.disconnect()
+                    self.worker.finished.disconnect()
+                    self.worker.error.disconnect()
+                except:
+                    pass
+                self.worker = None
+            
             self._is_processing = False
+            
+            # Re-enable buttons
+            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
+            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
+            if ok_button:
+                ok_button.setEnabled(True)
+            if cancel_button:
+                cancel_button.setEnabled(True)
+            
+            # Reconnect processing signal
+            try:
+                self.dlg.processing_started.disconnect()
+            except:
+                pass
+            self.dlg.processing_started.connect(self._start_processing)
+            
             self.iface.messageBar().pushMessage(
                 "Error",
-                "Unexpected error occurred",
+                f"Unexpected error occurred: {str(e)[:200]}",
                 level=2,
-                duration=5
+                duration=10
             )
     
     def _on_progress(self, value, message):
@@ -392,31 +418,87 @@ class VecPlugin:
             self._is_processing = False
             
             # Close dialog after a short delay (use done() to avoid triggering accept() signal)
-            QtCore.QTimer.singleShot(1000, lambda: self.dlg.done(QDialog.Accepted))
+            QTimer.singleShot(1000, lambda: self.dlg.done(QDialog.Accepted))
             
         except Exception as e:
+            # Ensure cleanup happens
+            if hasattr(self, 'worker') and self.worker:
+                try:
+                    self.worker.progress.disconnect()
+                    self.worker.finished.disconnect()
+                    self.worker.error.disconnect()
+                except:
+                    pass
             self._is_processing = False
             self._on_error(str(e))
     
     def _on_error(self, error_message):
         """Handle inference errors."""
-        self._is_processing = False
-        self.dlg.progressBar.setVisible(False)
-        self.dlg.statusLabel.setText("Error occurred")
-        self.iface.messageBar().pushMessage(
-            "Error",
-            "Inference failed",
-            level=2,  # Critical
-            duration=5
-        )
-        
-        # Re-enable buttons
-        ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
-        cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
-        if ok_button:
-            ok_button.setEnabled(True)
-        if cancel_button:
-            cancel_button.setEnabled(True)
+        try:
+            # Clean up worker thread
+            if hasattr(self, 'worker') and self.worker:
+                try:
+                    # Disconnect all signals first
+                    self.worker.progress.disconnect()
+                    self.worker.finished.disconnect()
+                    self.worker.error.disconnect()
+                except:
+                    pass
+                
+                # Wait for thread to finish (with timeout)
+                if self.worker.isRunning():
+                    self.worker.wait(1000)  # Wait up to 1 second
+                    if self.worker.isRunning():
+                        # Force terminate if still running
+                        self.worker.terminate()
+                        self.worker.wait(500)
+                
+                # Clean up reference
+                self.worker = None
+            
+            # Reset processing flag
+            self._is_processing = False
+            
+            # Reset UI
+            self.dlg.progressBar.setVisible(False)
+            self.dlg.statusLabel.setText(f"Error: {error_message[:100]}")
+            
+            # Show error message
+            self.iface.messageBar().pushMessage(
+                "Error",
+                f"Inference failed: {error_message[:200]}",
+                level=2,  # Critical
+                duration=10
+            )
+            
+            # Re-enable buttons
+            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
+            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
+            if ok_button:
+                ok_button.setEnabled(True)
+            if cancel_button:
+                cancel_button.setEnabled(True)
+            
+            # Reconnect processing signal to allow retry
+            try:
+                self.dlg.processing_started.disconnect()
+            except:
+                pass
+            self.dlg.processing_started.connect(self._start_processing)
+            
+        except Exception as e:
+            # Last resort cleanup
+            self._is_processing = False
+            # Sanitize URLs from error messages
+            error_msg = str(e)
+            import re
+            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+            sanitized_error = re.sub(url_pattern, '[REDACTED]', error_msg)
+            QgsMessageLog.logMessage(
+                f"Error in error handler: {sanitized_error}",
+                "VEC Plugin",
+                Qgis.Critical
+            )
     
     def _create_vector_layer(self, shapefile_path, layer_name, crs):
         """
