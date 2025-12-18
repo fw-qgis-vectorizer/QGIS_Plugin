@@ -27,7 +27,7 @@ tags=
 
 homepage=http://homepage
 category=Plugins
-icon=icon.png
+icon=binocular.png
 # experimental flag
 experimental=True
 

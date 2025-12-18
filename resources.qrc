@@ -1,5 +1,5 @@
 <RCC>
     <qresource prefix="/plugins/vec_plugin" >
-        <file>icon.png</file>
+        <file>binocular.png</file>
     </qresource>
 </RCC>
