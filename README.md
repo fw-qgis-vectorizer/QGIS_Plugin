@@ -23,7 +23,7 @@ A QGIS plugin that integrates with the VEC inference service for automated build
 1. **Download the Plugin**
    - Clone or download this repository:
      ```bash
-     git clone https://github.com/Salesngine/qgis_plugin.git
+     git clone https://github.com/fw-qgis-vectorizer/QGIS_Plugin.git
      ```
    - Or download as ZIP from GitHub and extract it
 
@@ -166,12 +166,12 @@ These settings optimize file size while maintaining data quality.
 
 ## License
 
-[Add your license information here]
+This plugin is licensed under the MIT License. See [LICENSE](LICENSE) file for details.
 
 ## Support
 
 For issues, questions, or contributions, please visit:
-https://github.com/Salesngine/qgis_plugin
+https://github.com/fw-qgis-vectorizer/QGIS_Plugin
 
 ## Version
 

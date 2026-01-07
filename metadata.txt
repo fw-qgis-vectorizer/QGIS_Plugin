@@ -9,8 +9,9 @@ qgisMinimumVersion=3.0
 description=Integration with VEC inference service for building detection
 version=1.0
 author=FieldWatch
+email=support@usefieldwatch.com
 
-about=Integration with VEC inference service for building detection
+about=Integration with VEC inference service for building detection. Requires 'requests' Python library (install via pip if not available in OSGeo4W Python).
 
 tracker=https://github.com/fw-qgis-vectorizer/QGIS_Plugin/issues
 repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
@@ -52,6 +53,7 @@ license=MIT
 # Maintainer
 # FieldWatch
 # Website: https://usefieldwatch.com/
+# Email: support@usefieldwatch.com
 
 # If the plugin can run on QGIS Server.
 server=False
