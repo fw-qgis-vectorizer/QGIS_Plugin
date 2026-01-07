@@ -171,7 +171,7 @@ These settings optimize file size while maintaining data quality.
 ## Support
 
 For issues, questions, or contributions, please visit:
-https://github.com/Salesngine/qgis_plugin
+[https://github.com/Salesngine/qgis_plugin](https://github.com/fw-qgis-vectorizer/QGIS_Plugin/issues)
 
 ## Version
 
