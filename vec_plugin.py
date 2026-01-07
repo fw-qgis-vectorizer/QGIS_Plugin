@@ -198,7 +198,7 @@ class VecPlugin:
         icon_path = ':/plugins/vec_plugin/binocular.png'
         self.add_action(
             icon_path,
-            text=self.tr(u'Vec Inference'),
+            text=self.tr(u'FieldWatch'),
             callback=self.run,
             parent=self.iface.mainWindow())
 

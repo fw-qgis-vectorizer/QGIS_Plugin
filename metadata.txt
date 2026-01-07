@@ -1,35 +1,35 @@
 # This file contains metadata for your plugin.
 
-# This file should be included when you package your plugin.# Mandatory items:
+# This file should be included when you package your plugin.
+# Mandatory items:
 
 [general]
 name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
 description=Integration with VEC inference service for building detection
-version=0.1
-author=Anthony_FiledWatch
-email=kadibiaenu@gmail.com
+version=1.0
+author=FieldWatch
 
 about=Integration with VEC inference service for building detection
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/fw-qgis-vectorizer/QGIS_Plugin/issues
+repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
+
 # End of mandatory metadata
 
 # Recommended items:
 
 hasProcessingProvider=no
 # Uncomment the following line and add your changelog:
-# changelog=
+changelog=Initial release with building detection functionality
 
 # Tags are comma separated with spaces allowed
-tags=
+tags=raster,vector,ai,machine learning,building detection,segmentation,inference
 
-homepage=http://homepage
-category=Plugins
+homepage=https://usefieldwatch.com/
 icon=binocular.png
 # experimental flag
-experimental=True
+experimental=False
 
 # deprecated flag (applies to the whole plugin, not just a single version)
 deprecated=False
@@ -40,8 +40,18 @@ deprecated=False
 # plugin_dependencies=
 
 Category of the plugin: Raster, Vector, Database or Web
-# category=
+category=Raster
+license=MIT
+
+# Contributors (Core Tech)
+# - Ayodele Falowo
+# - Anthony Enujeko
+# - Gbolahan Falowo
+# - Tobi Adeyemi
+
+# Maintainer
+# FieldWatch
+# Website: https://usefieldwatch.com/
 
 # If the plugin can run on QGIS Server.
 server=False
-
