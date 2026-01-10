@@ -5,8 +5,7 @@
 #							 -------------------
 #		begin				: 2025-12-09
 #		git sha				: $Format:%H$
-#		copyright			: (C) 2025 by Anthony_FiledWatch
-#		email				: kadibiaenu@gmail.com
+#		copyright			: (C) 2025 FieldWatch AI
 # ***************************************************************************/
 #
 #/***************************************************************************
@@ -65,7 +64,7 @@ PEP8EXCLUDE=pydev,resources.py,conf.py,third_party,ui
 #	* Windows:
 #	  AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins'
 
-QGISDIR=C:\Users\kadib\AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins
+QGISDIR=$(HOME)/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins
 
 #################################################
 # Normally you would not need to edit below here

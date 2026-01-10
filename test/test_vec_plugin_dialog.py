@@ -8,9 +8,9 @@
 
 """
 
-__author__ = 'kadibiaenu@gmail.com'
+__author__ = 'FieldWatch'
 __date__ = '2025-12-09'
-__copyright__ = 'Copyright 2025, Anthony_FiledWatch'
+__copyright__ = 'Copyright 2025, FieldWatch'
 
 import unittest
 

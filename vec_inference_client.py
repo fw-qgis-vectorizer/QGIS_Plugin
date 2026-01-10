@@ -6,8 +6,7 @@
  Client for communicating with VEC inference service
                              -------------------
         begin                : 2025-12-09
-        copyright            : (C) 2025 by Anthony_FiledWatch
-        email                : kadibiaenu@gmail.com
+        copyright            : (C) 2025 FieldWatch AI
  ***************************************************************************/
 
 /***************************************************************************
@@ -130,7 +129,7 @@ class VecInferenceClient:
     def process_raster_layer(self, raster_layer, progress_callback=None, crop_geometry=None):
         """
         Process a QGIS raster layer through the inference pipeline.
-        Uses hardcoded high compression (DEFLATE, predictor 2, zlevel 9).
+        Uses hardcoded compression settings.
         
         :param raster_layer: QGIS raster layer to process
         :type raster_layer: QgsRasterLayer

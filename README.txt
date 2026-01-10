@@ -1,11 +1,3 @@
-Plugin Builder Results
-
-Your plugin VecPlugin was created in:
-    C:\Users\kadib\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\vec_plugin
-
-Your QGIS plugin directory is located at:
-    C:/Users/kadib/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins
-
 What's Next:
 
   * Copy the entire directory containing your new plugin to the QGIS plugin

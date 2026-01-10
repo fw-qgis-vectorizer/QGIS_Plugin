@@ -41,7 +41,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'VecPlugin'
-copyright = u'2013, Anthony_FiledWatch'
+copyright = u'2025, FieldWatch'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -179,7 +179,7 @@ htmlhelp_basename = 'TemplateClassdoc'
 # (source start file, target name, title, author, documentclass [howto/manual]).
 latex_documents = [
   ('index', 'VecPlugin.tex', u'VecPlugin Documentation',
-   u'Anthony_FiledWatch', 'manual'),
+   u'FieldWatch', 'manual'),
 ]
 
 # The name of an image file (relative to this directory) to place at the top of
@@ -212,5 +212,5 @@ latex_documents = [
 # (source start file, name, description, authors, manual section).
 man_pages = [
     ('index', 'TemplateClass', u'VecPlugin Documentation',
-     [u'Anthony_FiledWatch'], 1)
+     [u'FieldWatch'], 1)
 ]

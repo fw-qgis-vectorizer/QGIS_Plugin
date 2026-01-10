@@ -6,7 +6,6 @@ A QGIS plugin that integrates with the VEC inference service for automated build
 
 - **Polygon-based Area Selection**: Draw a polygon on the map to select the specific area for building detection
 - **Automated Processing Pipeline**: Uploads raster data, runs AI inference, and downloads results automatically
-- **High Compression**: Uses DEFLATE compression (predictor 2, zlevel 9) to minimize file sizes
 - **Progress Tracking**: Real-time progress updates during processing
 - **Automatic Layer Loading**: Results are automatically loaded into QGIS as a vector layer
 
@@ -112,15 +111,6 @@ The plugin uses hardcoded service endpoints:
 
 These are configured in the code and cannot be changed via the UI.
 
-## Compression Settings
-
-The plugin uses hardcoded compression settings:
-- **Compression Type**: DEFLATE
-- **Compression Level**: 9 (maximum)
-- **Predictor**: 2 (Horizontal)
-
-These settings optimize file size while maintaining data quality.
-
 ## Troubleshooting
 
 ### Plugin Not Appearing
@@ -144,25 +134,6 @@ These settings optimize file size while maintaining data quality.
 - Large files may take several minutes to upload
 - The timeout is set to 600 seconds (10 minutes)
 - For very large areas, consider drawing a smaller polygon
-
-## Technical Details
-
-### Processing Flow
-
-1. **Crop**: Raster is cropped to the drawn polygon area
-2. **Export**: Cropped raster is exported with DEFLATE compression
-3. **Upload**: Compressed raster is uploaded to GCS via `/upload` endpoint
-4. **Inference**: Inference job is started via `/infer/{file_id}` endpoint
-5. **Poll Status**: Plugin polls `/status/{job_id}` until completion
-6. **Download**: Shapefile is downloaded from `/download/shapefile/{file_id}`
-7. **Load**: Results are loaded into QGIS as a vector layer
-
-### Dependencies
-
-- `requests` - HTTP library for API communication
-- `qgis.core` - QGIS core functionality
-- `qgis.gui` - QGIS GUI components
-- `qgis.PyQt` - Qt bindings for Python
 
 ## License
 
