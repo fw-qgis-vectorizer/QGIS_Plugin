@@ -44,11 +44,12 @@ class InferenceWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(int, str)
     
-    def __init__(self, client, raster_layer, crop_geometry=None):
+    def __init__(self, client, raster_layer, crop_geometry=None, crop_geometry_crs=None):
         QThread.__init__(self)
         self.client = client
         self.raster_layer = raster_layer
         self.crop_geometry = crop_geometry
+        self.crop_geometry_crs = crop_geometry_crs
     
     def run(self):
         try:
@@ -58,7 +59,8 @@ class InferenceWorker(QThread):
             shapefile_path = self.client.process_raster_layer(
                 self.raster_layer,
                 progress_callback,
-                self.crop_geometry
+                self.crop_geometry,
+                crop_geometry_crs=self.crop_geometry_crs
             )
             
             self.finished.emit(shapefile_path)
@@ -235,7 +237,7 @@ class VecPlugin:
         except:
             pass
         self.dlg.processing_started.connect(self._start_processing)
-        
+
         # show the dialog (non-modal so it stays open during processing)
         self.dlg.show()
         # Run the dialog event loop
@@ -328,8 +330,14 @@ class VecPlugin:
             self._processing_output_name = output_name
             self._processing_input_layer = input_layer
             
+            # Get canvas CRS for crop geometry (polygon was drawn on canvas)
+            canvas_crs = None
+            if self.iface and self.iface.mapCanvas():
+                project = QgsProject.instance()
+                canvas_crs = project.crs() if project else None
+            
             # Create worker thread
-            self.worker = InferenceWorker(client, input_layer, crop_geometry)
+            self.worker = InferenceWorker(client, input_layer, crop_geometry, crop_geometry_crs=canvas_crs)
             self.worker.progress.connect(self._on_progress)
             self.worker.finished.connect(self._on_finished)
             self.worker.error.connect(self._on_error)

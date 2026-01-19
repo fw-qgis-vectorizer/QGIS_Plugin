@@ -168,18 +168,18 @@
      </property>
      <property name="wordWrap">
       <bool>true</bool>
-     </property>
+   </property>
     </widget>
    </item>
    <item>
     <widget class="QDialogButtonBox" name="button_box">
      <property name="orientation">
-      <enum>Qt::Horizontal</enum>
-     </property>
+    <enum>Qt::Horizontal</enum>
+   </property>
      <property name="standardButtons">
-      <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
-     </property>
-    </widget>
+    <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+   </property>
+  </widget>
    </item>
   </layout>
  </widget>

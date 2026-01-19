@@ -24,10 +24,25 @@ import os
 import time
 import zipfile
 import re
+import logging
+from qgis import processing
 from qgis.core import (
     QgsMessageLog, Qgis, QgsRasterPipe, 
-    QgsRasterFileWriter, QgsRasterLayer, QgsGeometry
+    QgsRasterFileWriter, QgsRasterLayer, QgsGeometry,
+    QgsVectorLayer, QgsFeature, QgsCoordinateTransform, QgsProject, QgsField, QgsApplication
 )
+from qgis.PyQt.QtCore import QVariant
+from .gdal_bootstrap import ensure_gdal_environment
+
+# Setup logging for raster cropping operations
+logger = logging.getLogger('RasterCropLogger')
+if not logger.hasHandlers():
+    logger.setLevel(logging.INFO)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(levelname)s: %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
 
 
 class VecInferenceClient:
@@ -126,7 +141,7 @@ class VecInferenceClient:
             headers['Authorization'] = f'Bearer {self.jwt_token}'
         return headers
     
-    def process_raster_layer(self, raster_layer, progress_callback=None, crop_geometry=None):
+    def process_raster_layer(self, raster_layer, progress_callback=None, crop_geometry=None, crop_geometry_crs=None):
         """
         Process a QGIS raster layer through the inference pipeline.
         Uses hardcoded compression settings.
@@ -137,6 +152,8 @@ class VecInferenceClient:
         :type progress_callback: function
         :param crop_geometry: Optional polygon geometry to crop raster
         :type crop_geometry: QgsGeometry
+        :param crop_geometry_crs: CRS of the canvas where geometry was drawn
+        :type crop_geometry_crs: QgsCoordinateReferenceSystem
         :returns: Path to shapefile results
         :rtype: str
         """
@@ -148,7 +165,62 @@ class VecInferenceClient:
             if progress_callback:
                 progress_callback(5, "Cropping raster to selected area...")
             
-            raster_layer = self._crop_raster(raster_layer, crop_geometry)
+            # Convert crop_geometry to a temporary vector layer for _crop_raster
+            raster_crs = raster_layer.crs()
+            logger.info(f"Original raster CRS: {raster_crs.authid()}")
+            logger.info(f"Crop geometry CRS: {crop_geometry_crs.authid() if crop_geometry_crs and crop_geometry_crs.isValid() else 'None'}")
+            
+            # Transform geometry to raster CRS if needed
+            if crop_geometry_crs and crop_geometry_crs.isValid() and crop_geometry_crs != raster_crs:
+                transform = QgsCoordinateTransform(crop_geometry_crs, raster_crs, QgsProject.instance())
+                crop_geometry = QgsGeometry(crop_geometry)
+                crop_geometry.transform(transform)
+                logger.info("Crop geometry transformed to raster CRS")
+            else:
+                crop_geometry = QgsGeometry(crop_geometry)
+            
+            # Create a memory layer with the crop geometry
+            temp_vector_layer = QgsVectorLayer(f"Polygon?crs={raster_crs.authid()}", "temp_crop", "memory")
+            if not temp_vector_layer.isValid():
+                raise Exception("Failed to create temporary vector layer for cropping")
+            
+            # Add WKT field first
+            temp_vector_layer.dataProvider().addAttributes([QgsField('wkt_geom', QVariant.String)])
+            temp_vector_layer.updateFields()
+            
+            # Add geometry as feature with WKT
+            feature = QgsFeature(temp_vector_layer.fields())
+            feature.setGeometry(crop_geometry)
+            feature['wkt_geom'] = crop_geometry.asWkt()
+            temp_vector_layer.dataProvider().addFeature(feature)
+            temp_vector_layer.updateExtents()
+            # Explicitly set CRS to match raster (geometries are already transformed)
+            temp_vector_layer.setCrs(raster_crs)
+            logger.info(f"Temporary vector layer created with crop geometry. Features: {temp_vector_layer.featureCount()}, CRS: {temp_vector_layer.crs().authid()}")
+            
+            # Store original extent for validation
+            original_extent = raster_layer.extent()
+            original_width = raster_layer.width()
+            original_height = raster_layer.height()
+            
+            # Crop the raster - pass None for vector_crs since geometries are already in raster CRS
+            cropped_raster_layer = self._crop_raster(raster_layer, temp_vector_layer, 'wkt_geom', None)
+            
+            # Validate that we got a valid cropped layer
+            if not cropped_raster_layer or not cropped_raster_layer.isValid():
+                raise Exception("Failed to create cropped raster layer. Cannot proceed with original raster.")
+            
+            # Validate that the cropped layer is actually different from the original
+            cropped_extent = cropped_raster_layer.extent()
+            cropped_width = cropped_raster_layer.width()
+            cropped_height = cropped_raster_layer.height()
+            
+            logger.info(f"Original raster extent: {original_extent.toString()}, size: {original_width}x{original_height}")
+            logger.info(f"Cropped raster extent: {cropped_extent.toString()}, size: {cropped_width}x{cropped_height}")
+            
+            # Use the cropped layer for export
+            raster_layer = cropped_raster_layer
+            logger.info(f"Using cropped raster layer for export. CRS: {raster_layer.crs().authid()}")
             QgsMessageLog.logMessage(
                 "Raster cropped, compressing for upload...",
                 "VEC Plugin",
@@ -247,20 +319,61 @@ class VecInferenceClient:
             )
             raise
     
+    def _ensure_gdal_environment(self):
+        """
+        Ensure GDAL_DATA and PROJ_LIB environment variables are set for subprocess calls.
+        This must be called before each processing.run() call to ensure subprocesses inherit the vars.
+        Uses shared function from gdal_bootstrap module.
+        """
+        gdal_data_path, proj_lib_path = ensure_gdal_environment()
+        
+        if gdal_data_path:
+            logger.info(f"Set GDAL_DATA={gdal_data_path} (gcs.csv exists: {os.path.exists(os.path.join(gdal_data_path, 'gcs.csv'))})")
+        else:
+            logger.warning("GDAL_DATA not found - EPSG support may be limited")
+        
+        if proj_lib_path:
+            logger.info(f"Set PROJ_LIB={proj_lib_path}")
+        else:
+            logger.warning("PROJ_LIB not found")
+    
     def _export_raster_to_temp(self, raster_layer):
         """
-        Export raster layer to temporary GeoTIFF file with hardcoded high compression.
-        Uses DEFLATE compression with predictor 2 (Horizontal) and zlevel 9.
+        Export raster layer to temporary GeoTIFF file with maximum compression.
+        Uses aggressive compression settings to minimize file size for upload.
         
         :param raster_layer: QGIS raster layer
         :type raster_layer: QgsRasterLayer
         :returns: Path to temporary file
         :rtype: str
         """
-        # Hardcoded compression settings: DEFLATE, predictor 2, zlevel 9
+        # Ensure GDAL environment is set before processing
+        self._ensure_gdal_environment()
+        
+        # Get GDAL paths for passing to subprocess via EXTRA
+        gdal_data_path, proj_lib_path = ensure_gdal_environment()
+        
+        # Get raster info for logging
+        provider = raster_layer.dataProvider()
+        width = provider.xSize()
+        height = provider.ySize()
+        band_count = raster_layer.bandCount()
+        
+        # Log original raster size info
+        QgsMessageLog.logMessage(
+            f"Exporting raster: {width}x{height}, {band_count} band(s)",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        
+        # Maximum compression settings:
+        # - DEFLATE with zlevel 9 (maximum)
+        # - Predictor 2 for better compression of imagery
+        # - TILED=YES for better compression and faster processing
+        # - BLOCKXSIZE and BLOCKYSIZE for tiling
         compression = 'DEFLATE'
-        predictor = '2'  # Horizontal predictor
-        zlevel = 9
+        predictor = '2'  # Horizontal predictor (best for imagery)
+        zlevel = 9  # Maximum compression level (1-9)
         
         # Create temporary file
         temp_fd, temp_path = tempfile.mkstemp(suffix='.tif')
@@ -271,24 +384,160 @@ class VecInferenceClient:
             from qgis.core import QgsProcessing
             from qgis import processing
             
-            # Build creation options for compression (hardcoded: DEFLATE, predictor 2, zlevel 9)
+            # Build creation options for maximum compression
+            # TILED=YES significantly improves compression ratios
             creation_options = [
                 f"COMPRESS={compression}",
                 f"ZLEVEL={zlevel}",
-                f"PREDICTOR={predictor}"
+                f"PREDICTOR={predictor}",
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512"
             ]
+            
+            # Build EXTRA parameter with GDAL config options to pass GDAL_DATA and PROJ_LIB
+            # GDAL command-line tools accept --config GDAL_DATA <path> and --config PROJ_LIB <path>
+            extra_options = []
+            if gdal_data_path:
+                extra_options.append(f'--config GDAL_DATA "{gdal_data_path}"')
+            if proj_lib_path:
+                extra_options.append(f'--config PROJ_LIB "{proj_lib_path}"')
+            extra_string = ' '.join(extra_options) if extra_options else ''
             
             # Use gdal:translate with compression options
             params = {
                 'INPUT': raster_layer,
                 'OUTPUT': temp_path,
-                'CREATEOPTIONS': '|'.join(creation_options)
+                'CREATEOPTIONS': '|'.join(creation_options),
+                'EXTRA': extra_string
             }
             
+            QgsMessageLog.logMessage(
+                f"Compressing raster with {compression} (zlevel {zlevel}, predictor {predictor}, tiled)...",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
             result = processing.run("gdal:translate", params)
-            return result['OUTPUT']
-        except Exception:
+            output_path = result['OUTPUT']
+            
+            # Log file size after compression
+            if os.path.exists(output_path):
+                file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                QgsMessageLog.logMessage(
+                    f"Compressed raster size: {file_size_mb:.2f} MB",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                
+                # If file is still very large (>400MB), try resampling to reduce size
+                # This helps prevent 413 errors from upload service
+                max_file_size_mb = 400  # Threshold for resampling (conservative)
+                if file_size_mb > max_file_size_mb:
+                    QgsMessageLog.logMessage(
+                        f"File size ({file_size_mb:.2f} MB) exceeds threshold ({max_file_size_mb} MB). "
+                        f"Attempting to resample to reduce size...",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    
+                    # Calculate resampling factor to get file under threshold
+                    # Target ~350MB to leave buffer
+                    target_size_mb = 350
+                    resample_factor = (target_size_mb / file_size_mb) ** 0.5  # Square root since we scale X and Y
+                    new_width = max(512, int(width * resample_factor))  # Minimum 512px
+                    new_height = max(512, int(height * resample_factor))
+                    
+                    QgsMessageLog.logMessage(
+                        f"Resampling from {width}x{height} to {new_width}x{new_height} "
+                        f"(factor: {resample_factor:.2f})",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+                    
+                    # Create resampled version using gdal:translate with size reduction
+                    resampled_fd, resampled_path = tempfile.mkstemp(suffix='.tif')
+                    os.close(resampled_fd)
+                    
+                    resampled_layer = QgsRasterLayer(output_path, 'temp_resampled')
+                    if resampled_layer.isValid():
+                        resample_options = [
+                            f"COMPRESS={compression}",
+                            f"ZLEVEL={zlevel}",
+                            f"PREDICTOR={predictor}",
+                            "TILED=YES",
+                            "BLOCKXSIZE=512",
+                            "BLOCKYSIZE=512"
+                        ]
+                        
+                        extra_options = []
+                        if gdal_data_path:
+                            extra_options.append(f'--config GDAL_DATA "{gdal_data_path}"')
+                        if proj_lib_path:
+                            extra_options.append(f'--config PROJ_LIB "{proj_lib_path}"')
+                        extra_string = ' '.join(extra_options) if extra_options else ''
+                        
+                        resample_params = {
+                            'INPUT': resampled_layer,
+                            'OUTPUT': resampled_path,
+                            'WIDTH': new_width,
+                            'HEIGHT': new_height,
+                            'CREATEOPTIONS': '|'.join(resample_options),
+                            'EXTRA': extra_string
+                        }
+                        
+                        try:
+                            resample_result = processing.run("gdal:translate", resample_params)
+                            resampled_output = resample_result['OUTPUT']
+                            
+                            # Clean up original large file and use resampled version
+                            if os.path.exists(resampled_output):
+                                resampled_size_mb = os.path.getsize(resampled_output) / (1024 * 1024)
+                                QgsMessageLog.logMessage(
+                                    f"Resampled raster size: {resampled_size_mb:.2f} MB "
+                                    f"(reduced from {file_size_mb:.2f} MB)",
+                                    "VEC Plugin",
+                                    Qgis.Info
+                                )
+                                
+                                # Delete original large file
+                                try:
+                                    os.remove(output_path)
+                                except:
+                                    pass
+                                
+                                output_path = resampled_output
+                            else:
+                                QgsMessageLog.logMessage(
+                                    "Resampling failed, using original compressed file",
+                                    "VEC Plugin",
+                                    Qgis.Warning
+                                )
+                        except Exception as resample_error:
+                            QgsMessageLog.logMessage(
+                                f"Resampling failed: {str(resample_error)}. Using original file.",
+                                "VEC Plugin",
+                                Qgis.Warning
+                            )
+                            # Continue with original file
+                else:
+                    QgsMessageLog.logMessage(
+                        f"Compressed file size ({file_size_mb:.2f} MB) is acceptable for upload",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+            
+            return output_path
+        except Exception as e:
+            # Log the exception but try fallback
+            QgsMessageLog.logMessage(
+                f"GDAL translate failed, trying fallback method: {str(e)}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            
             # Fallback to direct export (without compression)
+            # This is less optimal but better than failing completely
             provider = raster_layer.dataProvider()
             pipe = QgsRasterPipe()
             
@@ -307,101 +556,253 @@ class VecInferenceClient:
             if error != QgsRasterFileWriter.NoError:
                 raise Exception(f"Failed to write raster: {error}")
             
+            # Log fallback file size
+            if os.path.exists(temp_path):
+                file_size_mb = os.path.getsize(temp_path) / (1024 * 1024)
+                QgsMessageLog.logMessage(
+                    f"Fallback export (no compression) size: {file_size_mb:.2f} MB",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+            
             return temp_path
     
-    def _crop_raster(self, raster_layer, crop_geometry):
+    def _crop_raster(self, raster_layer, vector_layer, wkt_field='wkt_geom', vector_crs=None):
         """
-        Crop raster layer to the specified polygon geometry.
-        
+        Crop a raster layer using polygons from a vector layer (with WKT geometries).
+
         :param raster_layer: QGIS raster layer to crop
         :type raster_layer: QgsRasterLayer
-        :param crop_geometry: Polygon geometry to crop to
-        :type crop_geometry: QgsGeometry
+        :param vector_layer: Vector layer containing polygons in WKT
+        :type vector_layer: QgsVectorLayer
+        :param wkt_field: Field name containing WKT geometry
+        :type wkt_field: str
+        :param vector_crs: CRS of the vector layer (if different from raster CRS)
+        :type vector_crs: QgsCoordinateReferenceSystem
         :returns: Cropped raster layer
         :rtype: QgsRasterLayer
         """
         try:
-            from qgis import processing
-            from qgis.core import QgsVectorLayer, QgsFeature, QgsCoordinateTransform, QgsProject
-            
-            # Transform geometry to raster CRS if needed
             raster_crs = raster_layer.crs()
-            geometry_crs = crop_geometry.crs() if hasattr(crop_geometry, 'crs') else None
-            
-            if geometry_crs and geometry_crs != raster_crs:
-                transform = QgsCoordinateTransform(geometry_crs, raster_crs, QgsProject.instance())
-                crop_geometry = QgsGeometry(crop_geometry)
-                crop_geometry.transform(transform)
-            
-            # Get extent of crop geometry
-            extent = crop_geometry.boundingBox()
-            
-            # Use gdal:cliprasterbymasklayer (more accurate than extent-based)
+            logger.info(f"Raster CRS: {raster_crs.authid()}")
+
+            # Determine vector CRS
+            geometry_crs = vector_crs if vector_crs else vector_layer.crs()
+            logger.info(f"Vector CRS: {geometry_crs.authid() if geometry_crs.isValid() else 'None'}")
+
+            # Prepare in-memory polygon layer for mask
+            # Use authid() to get the CRS identifier, or use toWkt() if authid is not available
             try:
-                # Create a memory layer with the geometry
-                mem_layer = QgsVectorLayer(
-                    f"Polygon?crs={raster_crs.authid()}",
-                    "temp_mask",
-                    "memory"
+                crs_authid = raster_crs.authid()
+                if not crs_authid or crs_authid == '':
+                    # Fall back to EPSG code or WKT if authid is not available
+                    epsg_code = raster_crs.postgisSrid()
+                    if epsg_code and epsg_code > 0:
+                        crs_authid = f"EPSG:{epsg_code}"
+                    else:
+                        crs_authid = raster_crs.toWkt()
+            except:
+                crs_authid = raster_crs.toWkt()
+            
+            mem_layer = QgsVectorLayer(f"Polygon?crs={crs_authid}", "mask", "memory")
+            provider = mem_layer.dataProvider()
+            if not mem_layer.isValid():
+                raise Exception("Failed to create memory mask layer")
+            
+            # Explicitly set CRS to ensure it matches raster
+            mem_layer.setCrs(raster_crs)
+            logger.info(f"Memory mask layer CRS set to: {mem_layer.crs().authid() if mem_layer.crs().authid() else 'WKT'}")
+
+            # Raster extent for filtering
+            raster_extent = raster_layer.extent()
+            logger.info(f"Raster extent: {raster_extent.toString()}")
+
+            # Prepare CRS transform if needed
+            transform = None
+            if geometry_crs.isValid() and raster_crs != geometry_crs:
+                transform = QgsCoordinateTransform(geometry_crs, raster_crs, QgsProject.instance())
+                logger.info("CRS transform prepared for vector geometries.")
+
+            # Add polygons from WKT
+            features_to_add = []
+            skipped_count = 0
+            for feat in vector_layer.getFeatures():
+                wkt = feat[wkt_field]
+                if not wkt:
+                    skipped_count += 1
+                    logger.warning("Skipped feature: empty WKT")
+                    continue
+
+                geom = QgsGeometry.fromWkt(wkt)
+                if geom.isEmpty():
+                    skipped_count += 1
+                    logger.warning("Skipped feature: empty geometry")
+                    continue
+
+                # Log original geometry extent before transformation
+                original_bbox = geom.boundingBox()
+                logger.info(f"Original polygon extent (before transform): {original_bbox.toString()}")
+
+                # Transform geometry if needed
+                if transform:
+                    try:
+                        geom.transform(transform)
+                        logger.info("Geometry transformed to raster CRS")
+                    except Exception as transform_err:
+                        logger.error(f"CRS transformation failed: {transform_err}")
+                        QgsMessageLog.logMessage(
+                            f"CRS transformation error: {transform_err}. Original CRS: {geometry_crs.authid()}, Raster CRS: {raster_crs.authid()}",
+                            "VEC Plugin",
+                            Qgis.Critical
+                        )
+                        skipped_count += 1
+                        continue
+
+                # Log transformed geometry extent
+                geom_bbox = geom.boundingBox()
+                logger.info(f"Transformed polygon extent: {geom_bbox.toString()}")
+                logger.info(f"Raster extent: {raster_extent.toString()}")
+
+                # Check if polygon intersects raster (use actual geometry intersection, not just bounding box)
+                # First check bounding box for quick rejection
+                if not geom_bbox.intersects(raster_extent):
+                    skipped_count += 1
+                    logger.warning(f"Polygon bounding box outside raster extent. Polygon: {geom_bbox.toString()}, Raster: {raster_extent.toString()}")
+                    QgsMessageLog.logMessage(
+                        f"Polygon does not intersect raster. Polygon bbox: {geom_bbox.toString()}, Raster extent: {raster_extent.toString()}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    continue
+
+                # More thorough check: create a geometry from raster extent and check actual intersection
+                raster_geom = QgsGeometry.fromRect(raster_extent)
+                if not geom.intersects(raster_geom):
+                    skipped_count += 1
+                    logger.warning(f"Polygon geometry does not intersect raster geometry (even though bboxes overlap)")
+                    QgsMessageLog.logMessage(
+                        f"Polygon geometry does not intersect raster. This may indicate a CRS mismatch issue.",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    continue
+
+                logger.info(f"Polygon intersects raster - adding to mask layer")
+
+                f = QgsFeature()
+                f.setGeometry(geom)
+                features_to_add.append(f)
+
+            # CRITICAL CHECK: Ensure we have at least one polygon
+            if len(features_to_add) == 0:
+                error_msg = (
+                    f"No valid polygons found for cropping. "
+                    f"Skipped {skipped_count} features. "
+                    f"Make sure your polygon intersects the raster layer. "
+                    f"Raster extent: {raster_extent.toString()}"
                 )
-                
-                if not mem_layer.isValid():
-                    raise Exception("Failed to create memory layer")
-                
-                # Add feature with crop geometry
-                feature = QgsFeature()
-                feature.setGeometry(crop_geometry)
-                mem_layer.dataProvider().addFeature(feature)
-                mem_layer.updateExtents()
-                
-                # Clip raster by mask
-                params = {
-                    'INPUT': raster_layer,
-                    'MASK': mem_layer,
-                    'SOURCE_CRS': raster_crs,
-                    'TARGET_CRS': raster_crs,
-                    'NODATA': None,
-                    'ALPHA_BAND': False,
-                    'CROP_TO_CUTLINE': True,
-                    'KEEP_RESOLUTION': False,
-                    'SET_RESOLUTION': False,
-                    'X_RESOLUTION': None,
-                    'Y_RESOLUTION': None,
-                    'MULTITHREADING': False,
-                    'OPTIONS': '',
-                    'DATA_TYPE': 0,
-                    'EXTRA': '',
-                    'OUTPUT': 'TEMPORARY_OUTPUT'
-                }
-                
-                result = processing.run("gdal:cliprasterbymasklayer", params)
-                cropped_layer = QgsRasterLayer(result['OUTPUT'], 'cropped_raster')
-                
-                if cropped_layer.isValid():
-                    return cropped_layer
-                else:
-                    raise Exception("Failed to create cropped raster layer")
-                    
-            except Exception as e:
-                # Fallback to extent-based clipping
-                params = {
-                    'INPUT': raster_layer,
-                    'PROJWIN': extent,
-                    'OUTPUT': 'TEMPORARY_OUTPUT'
-                }
-                
-                result = processing.run("gdal:cliprasterbyextent", params)
-                cropped_layer = QgsRasterLayer(result['OUTPUT'], 'cropped_raster')
-                
-                if cropped_layer.isValid():
-                    return cropped_layer
-                else:
-                    raise Exception("Failed to create cropped raster layer")
-                    
-        except Exception:
-            # Return original layer if cropping fails
-            return raster_layer
-    
+                logger.error(error_msg)
+                QgsMessageLog.logMessage(error_msg, "VEC Plugin", Qgis.Critical)
+                raise Exception(error_msg)
+
+            # Add all features at once
+            if not provider.addFeatures(features_to_add):
+                raise Exception(f"Failed to add {len(features_to_add)} features to mask layer")
+            
+            mem_layer.updateExtents()
+            logger.info(f"Memory mask layer created with {len(features_to_add)} polygon(s)")
+
+            # Ensure GDAL environment is set right before GDAL subprocess call
+            # QGIS processing framework spawns GDAL as subprocess, so env vars must be set now
+            self._ensure_gdal_environment()
+            
+            # Get GDAL paths for passing to subprocess via EXTRA
+            # GDAL subprocesses don't inherit Python environment variables, so we pass via --config
+            gdal_data_path, proj_lib_path = ensure_gdal_environment()
+            
+            # Build EXTRA parameter with GDAL config options
+            # GDAL command-line tools accept --config GDAL_DATA <path> and --config PROJ_LIB <path>
+            extra_options = []
+            if gdal_data_path:
+                extra_options.append(f'--config GDAL_DATA "{gdal_data_path}"')
+            if proj_lib_path:
+                extra_options.append(f'--config PROJ_LIB "{proj_lib_path}"')
+            extra_string = ' '.join(extra_options) if extra_options else ''
+
+            # Crop raster using GDAL clip tool
+            # Don't set SOURCE_CRS/TARGET_CRS explicitly - let GDAL infer from layers
+            # This avoids transformation issues with complex compound CRS
+            params = {
+                'INPUT': raster_layer,
+                'MASK': mem_layer,
+                'NODATA': None,
+                'ALPHA_BAND': False,
+                'CROP_TO_CUTLINE': True,
+                'KEEP_RESOLUTION': True,
+                'SET_RESOLUTION': False,
+                'X_RESOLUTION': None,
+                'Y_RESOLUTION': None,
+                'MULTITHREADING': True,  # Enable multithreading
+                'OPTIONS': '',
+                'DATA_TYPE': 0,
+                'EXTRA': extra_string,  # Pass GDAL_DATA and PROJ_LIB via --config
+                'OUTPUT': 'TEMPORARY_OUTPUT'
+            }
+
+            logger.info("Running GDAL cliprasterbymasklayer...")
+            result = processing.run("gdal:cliprasterbymasklayer", params)
+            
+            # Validate processing result
+            if not result or 'OUTPUT' not in result:
+                raise Exception("GDAL processing did not return OUTPUT path")
+            
+            output_path = result['OUTPUT']
+            logger.info(f"GDAL processing completed. Output: {output_path}")
+            
+            # Check if output file exists
+            if not os.path.exists(output_path):
+                raise Exception(f"GDAL output file does not exist: {output_path}")
+            
+            # Check file size
+            file_size = os.path.getsize(output_path)
+            if file_size == 0:
+                raise Exception(f"GDAL output file is empty (0 bytes): {output_path}")
+            
+            logger.info(f"Output file exists: {output_path}, size: {file_size} bytes")
+            
+            # Try to load the raster layer
+            cropped_layer = QgsRasterLayer(output_path, 'cropped_raster')
+            
+            # Get detailed error if layer is invalid
+            if not cropped_layer.isValid():
+                error_details = cropped_layer.error().message() if cropped_layer.error().isValid() else "Unknown error"
+                error_msg = (
+                    f"Failed to create valid cropped raster layer. "
+                    f"File exists: {os.path.exists(output_path)}, "
+                    f"Size: {file_size} bytes, "
+                    f"Error: {error_details}"
+                )
+                logger.error(error_msg)
+                QgsMessageLog.logMessage(error_msg, "VEC Plugin", Qgis.Critical)
+                raise Exception(error_msg)
+            
+            # Validate layer has dimensions
+            if cropped_layer.width() == 0 or cropped_layer.height() == 0:
+                raise Exception(f"Cropped raster has zero dimensions: {cropped_layer.width()}x{cropped_layer.height()}")
+            
+            logger.info(f"Cropped raster created successfully. CRS: {cropped_layer.crs().authid()}, "
+                       f"Size: {cropped_layer.width()}x{cropped_layer.height()}")
+            return cropped_layer
+
+        except Exception as e:
+            logger.critical(f"Raster cropping failed: {e}")
+            QgsMessageLog.logMessage(
+                f"Raster cropping error details: {str(e)}",
+                "VEC Plugin",
+                Qgis.Critical
+            )
+            raise Exception(f"Raster cropping failed: {e}. Cannot proceed with original raster.") from e
+
     def _upload_to_gcs(self, image_path):
         """
         Upload image to GCS via /upload endpoint and get file_id.
@@ -411,6 +812,23 @@ class VecInferenceClient:
         :returns: file_id from upload service
         :rtype: str
         """
+        # Validate file exists and is readable
+        if not os.path.exists(image_path):
+            raise Exception(f"File not found: {image_path}")
+        
+        if not os.access(image_path, os.R_OK):
+            raise Exception(f"File is not readable: {image_path}")
+        
+        file_size = os.path.getsize(image_path)
+        if file_size == 0:
+            raise Exception(f"File is empty: {image_path}")
+        
+        QgsMessageLog.logMessage(
+            f"Uploading file: {os.path.basename(image_path)} ({file_size / (1024*1024):.2f} MB)",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        
         try:
             upload_endpoint = f"{self.upload_url}/upload"
             
@@ -431,28 +849,112 @@ class VecInferenceClient:
                         timeout=600
                     )
                     
-                except requests.exceptions.ConnectionError:
-                    raise Exception("Connection error - server unreachable")
-                except requests.exceptions.Timeout:
-                    raise Exception("Upload timeout after 600 seconds")
+                except requests.exceptions.ConnectionError as e:
+                    error_msg = self._sanitize_urls(str(e))
+                    QgsMessageLog.logMessage(
+                        f"Upload connection error: {error_msg}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    raise Exception("Connection error - server unreachable. Check your internet connection and try again.")
+                    
+                except requests.exceptions.Timeout as e:
+                    error_msg = self._sanitize_urls(str(e))
+                    QgsMessageLog.logMessage(
+                        f"Upload timeout: {error_msg}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    raise Exception("Upload timeout after 600 seconds. File may be too large or connection too slow.")
+                    
                 except requests.exceptions.RequestException as e:
-                    raise Exception("Upload request failed")
+                    error_msg = self._sanitize_urls(str(e))
+                    QgsMessageLog.logMessage(
+                        f"Upload request exception: {error_msg}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    raise Exception(f"Upload request failed: {type(e).__name__}")
                 
-                response.raise_for_status()
-                result = response.json()
+                # Check HTTP status code before trying to parse JSON
+                if response.status_code >= 400:
+                    error_detail = ""
+                    try:
+                        error_detail = response.text[:500]  # First 500 chars of error
+                    except:
+                        pass
+                    
+                    sanitized_error = self._sanitize_urls(error_detail)
+                    QgsMessageLog.logMessage(
+                        f"Upload HTTP error {response.status_code}: {sanitized_error}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    
+                    if response.status_code == 401:
+                        raise Exception("Authentication failed (401). JWT token may be invalid or expired. Please re-validate your license key.")
+                    elif response.status_code == 403:
+                        raise Exception("Access forbidden (403). Your license may not have permission for this operation.")
+                    elif response.status_code == 413:
+                        raise Exception("File too large (413). The upload service rejected the file size.")
+                    elif response.status_code == 429:
+                        raise Exception("Rate limit exceeded (429). Please wait a moment and try again.")
+                    elif response.status_code >= 500:
+                        raise Exception(f"Server error ({response.status_code}). The upload service encountered an internal error. Please try again later.")
+                    else:
+                        raise Exception(f"Upload failed with HTTP {response.status_code}. Please check your connection and try again.")
+                
+                # Parse response JSON
+                try:
+                    result = response.json()
+                except ValueError as e:
+                    QgsMessageLog.logMessage(
+                        f"Failed to parse upload response JSON: {e}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    raise Exception("Upload service returned invalid response. Please try again.")
                 
                 # Extract file_id from response
                 file_id = result.get('file_id') or result.get('id') or result.get('fileId')
                 
                 if not file_id:
-                    raise Exception("Upload service did not return file_id")
+                    QgsMessageLog.logMessage(
+                        f"Upload response missing file_id. Response: {self._sanitize_urls(str(result))}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    raise Exception("Upload service did not return file_id in response")
+                
+                QgsMessageLog.logMessage(
+                    f"Upload successful. File ID: {file_id}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
                 
                 return file_id
                 
         except requests.exceptions.RequestException as e:
-            raise Exception("Upload request failed") from e
+            # This should already be handled above, but keep as fallback
+            error_msg = self._sanitize_urls(str(e))
+            QgsMessageLog.logMessage(
+                f"Upload request exception (outer catch): {error_msg}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            raise Exception(f"Upload request failed: {type(e).__name__}")
+            
         except Exception as e:
-            raise Exception("Upload error") from e
+            # Re-raise if already formatted, otherwise wrap
+            if "Authentication failed" in str(e) or "Connection error" in str(e) or "timeout" in str(e).lower():
+                raise
+            error_msg = self._sanitize_urls(str(e))
+            QgsMessageLog.logMessage(
+                f"Upload error: {error_msg}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            raise Exception(f"Upload error: {error_msg}")
     
     def _start_inference(self, file_id, prompt="building", confidence=0.3, alpha=0.5, 
                         iou_threshold=0.15, remove_overlaps=True, overlap_method="clip"):
@@ -563,7 +1065,26 @@ class VecInferenceClient:
                     return status_data
                 elif status == 'failed':
                     error_msg = status_data.get('message', 'Processing failed')
-                    raise Exception(f"Inference job failed: {error_msg}")
+                    error_details = status_data.get('error', '')
+                    
+                    # Provide more user-friendly error messages for common server-side issues
+                    if 'No such file or directory' in error_msg or '[Errno 2]' in error_msg:
+                        # Server-side file access issue
+                        user_friendly_msg = (
+                            "The inference service encountered an internal error while creating output files. "
+                            "This is a server-side issue. Please try again, or contact support if the problem persists."
+                        )
+                        # Log the technical details for debugging
+                        QgsMessageLog.logMessage(
+                            f"Inference job failed - Server file error: {error_msg}",
+                            "VEC Plugin",
+                            Qgis.Warning
+                        )
+                        raise Exception(f"Inference job failed: {user_friendly_msg}")
+                    else:
+                        # Generic error - pass through server message but sanitize paths
+                        sanitized_error = self._sanitize_urls(error_msg)
+                        raise Exception(f"Inference job failed: {sanitized_error}")
                 
                 # Check timeout
                 elapsed = time.time() - start_time

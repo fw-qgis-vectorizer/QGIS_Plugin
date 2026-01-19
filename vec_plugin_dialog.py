@@ -150,6 +150,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         if raster_layers:
             for layer in raster_layers:
                 self.inputLayerCombo.addItem(layer.name(), layer)
+            # Explicitly enable the combo box when layers are found
+            self.inputLayerCombo.setEnabled(True)
         else:
             self.inputLayerCombo.addItem("No raster layers available", None)
             self.inputLayerCombo.setEnabled(False)

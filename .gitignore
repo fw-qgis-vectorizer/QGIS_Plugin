@@ -35,4 +35,5 @@ help/build/
 # Temporary files
 *.tmp
 *.log
+f.txt
 
