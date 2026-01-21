@@ -254,7 +254,7 @@ class VecInferenceClient:
               
                 file_id = self._upload_to_gcs(temp_file)
                 QgsMessageLog.logMessage(
-                    "Cropped raster uploaded, now processing...",
+                    f"Upload completed. File ID: {file_id}",
                     "VEC Plugin",
                     Qgis.Info
                 )
@@ -262,42 +262,42 @@ class VecInferenceClient:
                 if not file_id:
                     raise Exception("Failed to get file_id from upload service")
               
-                # Step 2: Call /infer/{file_id} endpoint
+                # Step 2: Call /infer/qgis/{file_id} endpoint
                 if progress_callback:
                     progress_callback(25, "Starting inference...")
+              
+                QgsMessageLog.logMessage(
+                    f"=== STARTING INFERENCE ===",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                QgsMessageLog.logMessage(
+                    f"File ID: {file_id}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+                QgsMessageLog.logMessage(
+                    f"Service URL: {self._sanitize_urls(self.service_url)}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
               
                 job_id = self._start_inference(file_id)
               
                 if not job_id:
                     raise Exception("Failed to start inference job")
               
-                # Step 3: Poll for status until complete
+                # Step 3: Download shapefile (using file_id from upload)
                 if progress_callback:
-                    progress_callback(35, "Processing inference...")
-              
-                status_response = self._poll_status(job_id, progress_callback)
+                    progress_callback(50, "Downloading results...")
               
                 QgsMessageLog.logMessage(
-                    "Processing complete! Pulling shapefile...",
+                    "Pulling shapefile...",
                     "VEC Plugin",
                     Qgis.Info
                 )
               
-                # Extract file_id from status response for download
-                file_id_for_download = None
-                if status_response and 'results' in status_response:
-                    file_id_for_download = status_response['results'].get('file_id')
-                elif status_response and 'file_id' in status_response:
-                    file_id_for_download = status_response.get('file_id')
-              
-                if not file_id_for_download:
-                    file_id_for_download = job_id  # Fallback to job_id
-              
-                # Step 4: Download shapefile
-                if progress_callback:
-                    progress_callback(90, "Downloading results...")
-              
-                shapefile_path = self._download_shapefile(file_id_for_download)
+                shapefile_path = self._download_shapefile(file_id)
               
                 QgsMessageLog.logMessage(
                     "Shapefile downloaded successfully",
@@ -773,7 +773,9 @@ class VecInferenceClient:
 
     def _upload_to_gcs(self, image_path):
         """
-        Upload image to GCS via /upload endpoint and get file_id.
+        Upload image to GCS via two-step process:
+        1. Get signed URL from Cloud Run (query params only, no file upload)
+        2. Upload directly to GCS using signed URL (bypasses Cloud Run 32MB limit)
       
         :param image_path: Path to image file
         :type image_path: str
@@ -791,120 +793,235 @@ class VecInferenceClient:
         if file_size == 0:
             raise Exception(f"File is empty: {image_path}")
       
+        file_size_mb = file_size / (1024 * 1024)
         QgsMessageLog.logMessage(
-            f"Uploading file: {os.path.basename(image_path)} ({file_size / (1024*1024):.2f} MB)",
+            f"Uploading file: {os.path.basename(image_path)} ({file_size_mb:.2f} MB)",
             "VEC Plugin",
             Qgis.Info
         )
       
         try:
             upload_endpoint = f"{self.upload_url}/upload"
-          
-            # Open file and prepare for upload
             file_name = os.path.basename(image_path)
-            with open(image_path, 'rb') as f:
-                files = {
-                    'file': (file_name, f, 'application/octet-stream')
-                }
-              
-                headers = self._get_auth_headers()
-              
+            content_type = "image/tiff"  # More accurate than application/octet-stream
+            
+            # Calculate expiration time based on file size
+            # Small files (<100MB): 1 hour
+            # Large files (100MB+): 4 hours
+            # Very large files (500MB+): 8 hours
+            # Huge files (1GB+): 24 hours
+            if file_size_mb < 100:
+                expiration_seconds = 3600  # 1 hour
+            elif file_size_mb < 500:
+                expiration_seconds = 14400  # 4 hours
+            elif file_size_mb < 1024:
+                expiration_seconds = 28800  # 8 hours
+            else:
+                expiration_seconds = 86400  # 24 hours
+            
+            # Step 1: Get signed URL from Cloud Run
+            try:
+                response = requests.post(
+                    upload_endpoint,
+                    params={
+                        "filename": file_name,
+                        "content_type": content_type,
+                        "expiration_seconds": expiration_seconds
+                    },
+                    headers=self._get_auth_headers(),  # JWT auth required for this step
+                    timeout=30  # Small request, should be fast
+                )
+            
+            except requests.exceptions.ConnectionError as e:
+                error_msg = self._sanitize_urls(str(e))
+                QgsMessageLog.logMessage(
+                    f"Upload connection error: {error_msg}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception("Connection error - server unreachable. Check your internet connection and try again.")
+            
+            except requests.exceptions.Timeout as e:
+                error_msg = self._sanitize_urls(str(e))
+                QgsMessageLog.logMessage(
+                    f"Upload timeout (getting signed URL): {error_msg}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception("Timeout getting signed URL. Please try again.")
+            
+            except requests.exceptions.RequestException as e:
+                error_msg = self._sanitize_urls(str(e))
+                QgsMessageLog.logMessage(
+                    f"Upload request exception (step 1): {error_msg}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Failed to get signed URL: {type(e).__name__}")
+            
+            # Check HTTP status code for step 1
+            if response.status_code >= 400:
+                error_detail = ""
                 try:
-                    response = requests.post(
-                        upload_endpoint,
-                        files=files,
-                        headers=headers,
-                        timeout=600
-                    )
-                  
-                except requests.exceptions.ConnectionError as e:
-                    error_msg = self._sanitize_urls(str(e))
-                    QgsMessageLog.logMessage(
-                        f"Upload connection error: {error_msg}",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    raise Exception("Connection error - server unreachable. Check your internet connection and try again.")
-                  
-                except requests.exceptions.Timeout as e:
-                    error_msg = self._sanitize_urls(str(e))
-                    QgsMessageLog.logMessage(
-                        f"Upload timeout: {error_msg}",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    raise Exception("Upload timeout after 600 seconds. File may be too large or connection too slow.")
-                  
-                except requests.exceptions.RequestException as e:
-                    error_msg = self._sanitize_urls(str(e))
-                    QgsMessageLog.logMessage(
-                        f"Upload request exception: {error_msg}",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    raise Exception(f"Upload request failed: {type(e).__name__}")
+                    error_detail = response.text[:500]
+                except:
+                    pass
               
-                # Check HTTP status code before trying to parse JSON
-                if response.status_code >= 400:
-                    error_detail = ""
-                    try:
-                        error_detail = response.text[:500]  # First 500 chars of error
-                    except:
-                        pass
-                  
-                    sanitized_error = self._sanitize_urls(error_detail)
-                    QgsMessageLog.logMessage(
-                        f"Upload HTTP error {response.status_code}: {sanitized_error}",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                  
-                    if response.status_code == 401:
-                        raise Exception("Authentication failed (401). JWT token may be invalid or expired. Please re-validate your license key.")
-                    elif response.status_code == 403:
-                        raise Exception("Access forbidden (403). Your license may not have permission for this operation.")
-                    elif response.status_code == 413:
-                        raise Exception("File too large (413). The upload service rejected the file size.")
-                    elif response.status_code == 429:
-                        raise Exception("Rate limit exceeded (429). Please wait a moment and try again.")
-                    elif response.status_code >= 500:
-                        raise Exception(f"Server error ({response.status_code}). The upload service encountered an internal error. Please try again later.")
-                    else:
-                        raise Exception(f"Upload failed with HTTP {response.status_code}. Please check your connection and try again.")
+                sanitized_error = self._sanitize_urls(error_detail)
+                QgsMessageLog.logMessage(
+                    f"Upload HTTP error {response.status_code} (getting signed URL): {sanitized_error}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
               
-                # Parse response JSON
+                if response.status_code == 401:
+                    raise Exception("Authentication failed (401). JWT token may be invalid or expired. Please re-validate your license key.")
+                elif response.status_code == 403:
+                    raise Exception("Access forbidden (403). Your license may not have permission for this operation.")
+                elif response.status_code == 429:
+                    raise Exception("Rate limit exceeded (429). Please wait a moment and try again.")
+                elif response.status_code >= 500:
+                    raise Exception(f"Server error ({response.status_code}). The upload service encountered an internal error. Please try again later.")
+                else:
+                    raise Exception(f"Failed to get signed URL (HTTP {response.status_code}). Please check your connection and try again.")
+            
+            # Parse response JSON from step 1
+            try:
+                result = response.json()
+            except ValueError as e:
+                QgsMessageLog.logMessage(
+                    f"Failed to parse signed URL response JSON: {e}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception("Upload service returned invalid response. Please try again.")
+            
+            # Extract signed_url and file_id from response
+            signed_url = result.get('signed_url') or result.get('signedUrl') or result.get('url')
+            file_id = result.get('file_id') or result.get('id') or result.get('fileId')
+            
+            if not signed_url:
+                QgsMessageLog.logMessage(
+                    f"Upload response missing signed_url. Response: {self._sanitize_urls(str(result))}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception("Upload service did not return signed_url in response")
+            
+            if not file_id:
+                QgsMessageLog.logMessage(
+                    f"Upload response missing file_id. Response: {self._sanitize_urls(str(result))}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception("Upload service did not return file_id in response")
+            
+            # Step 2: Upload directly to GCS using signed URL with progress tracking
+            try:
+                uploaded_bytes = 0
+                chunk_size = 8192  # 8KB chunks for progress tracking
+                last_logged_percent = -1
+                
+                def read_file_with_progress():
+                    """Generator that reads file in chunks and logs progress"""
+                    nonlocal uploaded_bytes, last_logged_percent
+                    with open(image_path, 'rb') as f:
+                        while True:
+                            chunk = f.read(chunk_size)
+                            if not chunk:
+                                break
+                            uploaded_bytes += len(chunk)
+                            percent = int((uploaded_bytes / file_size) * 100)
+                            uploaded_mb = uploaded_bytes / (1024 * 1024)
+                            
+                            # Log every 5% progress
+                            if percent >= last_logged_percent + 5:
+                                last_logged_percent = percent
+                                QgsMessageLog.logMessage(
+                                    f"Upload progress: {percent}% ({uploaded_mb:.2f} MB / {file_size_mb:.2f} MB)",
+                                    "VEC Plugin",
+                                    Qgis.Info
+                                )
+                            yield chunk
+                
+                upload_response = requests.put(
+                    signed_url,  # Signed URL already contains authentication
+                    data=read_file_with_progress(),
+                    headers={"Content-Type": content_type},  # Must match content_type used in step 1
+                    timeout=600  # Large files need longer timeout
+                )
+                
+                # Log 100% completion if not already logged
+                if uploaded_bytes >= file_size:
+                    QgsMessageLog.logMessage(
+                        f"Upload progress: 100% ({file_size_mb:.2f} MB / {file_size_mb:.2f} MB)",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+            
+            except requests.exceptions.ConnectionError as e:
+                error_msg = self._sanitize_urls(str(e))
+                QgsMessageLog.logMessage(
+                    f"GCS upload connection error: {error_msg}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception("Connection error uploading to GCS. Check your internet connection and try again.")
+            
+            except requests.exceptions.Timeout as e:
+                error_msg = self._sanitize_urls(str(e))
+                QgsMessageLog.logMessage(
+                    f"GCS upload timeout: {error_msg}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Upload timeout after 600 seconds. File ({file_size_mb:.2f} MB) may be too large or connection too slow. Try again or use a faster connection.")
+            
+            except requests.exceptions.RequestException as e:
+                error_msg = self._sanitize_urls(str(e))
+                QgsMessageLog.logMessage(
+                    f"GCS upload request exception: {error_msg}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"GCS upload failed: {type(e).__name__}")
+            
+            # Check HTTP status code for step 2 (GCS upload)
+            if upload_response.status_code >= 400:
+                error_detail = ""
                 try:
-                    result = response.json()
-                except ValueError as e:
-                    QgsMessageLog.logMessage(
-                        f"Failed to parse upload response JSON: {e}",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    raise Exception("Upload service returned invalid response. Please try again.")
+                    error_detail = upload_response.text[:500]
+                except:
+                    pass
               
-                # Extract file_id from response
-                file_id = result.get('file_id') or result.get('id') or result.get('fileId')
+                sanitized_error = self._sanitize_urls(error_detail)
+                QgsMessageLog.logMessage(
+                    f"GCS upload HTTP error {upload_response.status_code}: {sanitized_error}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
               
-                if not file_id:
-                    QgsMessageLog.logMessage(
-                        f"Upload response missing file_id. Response: {self._sanitize_urls(str(result))}",
-                        "VEC Plugin",
-                        Qgis.Warning
-                    )
-                    raise Exception("Upload service did not return file_id in response")
-              
-                return file_id
-              
+                if upload_response.status_code == 403:
+                    raise Exception("GCS upload forbidden (403). Signed URL may have expired or be invalid. Please try again.")
+                elif upload_response.status_code == 413:
+                    raise Exception("File too large (413). GCS rejected the file size.")
+                elif upload_response.status_code >= 500:
+                    raise Exception(f"GCS server error ({upload_response.status_code}). Please try again later.")
+                else:
+                    raise Exception(f"GCS upload failed with HTTP {upload_response.status_code}. Please try again.")
+            
+            # Upload successful
+            return file_id
+          
         except requests.exceptions.RequestException as e:
-            # This should already be handled above, but keep as fallback
+            # Fallback error handling
             error_msg = self._sanitize_urls(str(e))
             QgsMessageLog.logMessage(
                 f"Upload request exception (outer catch): {error_msg}",
                 "VEC Plugin",
                 Qgis.Warning
             )
-            raise Exception(f"Upload request failed: {type(e).__name__}")
+            raise Exception(f"Upload failed: {type(e).__name__}")
           
         except Exception as e:
             # Re-raise if already formatted, otherwise wrap
@@ -921,7 +1038,7 @@ class VecInferenceClient:
     def _start_inference(self, file_id, prompt="building", confidence=0.3, alpha=0.5,
                         iou_threshold=0.15, remove_overlaps=True, overlap_method="clip"):
         """
-        Start inference job by calling /infer/{file_id} endpoint.
+        Start inference job by calling /infer/qgis/{file_id} endpoint.
       
         :param file_id: File ID from upload service
         :type file_id: str
@@ -934,6 +1051,12 @@ class VecInferenceClient:
         :returns: job_id from inference service
         :rtype: str
         """
+        QgsMessageLog.logMessage(
+            f"_start_inference called with file_id: {file_id}",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        
         # Build query parameters
         params = {
             'prompt': prompt,
@@ -943,34 +1066,191 @@ class VecInferenceClient:
             'remove_overlaps': remove_overlaps,
             'overlap_method': overlap_method
         }
+        QgsMessageLog.logMessage(
+            f"Inference parameters: prompt={prompt}, confidence={confidence}, alpha={alpha}, "
+            f"iou_threshold={iou_threshold}, remove_overlaps={remove_overlaps}, overlap_method={overlap_method}",
+            "VEC Plugin",
+            Qgis.Info
+        )
       
         # Call inference endpoint
-        inference_endpoint = f"{self.service_url}/infer/{file_id}"
-      
+        inference_endpoint = f"{self.service_url}/infer/qgis/{file_id}"
+        QgsMessageLog.logMessage(
+            f"Calling inference endpoint: {self._sanitize_urls(inference_endpoint)}",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        
         try:
             headers = self._get_auth_headers()
-            response = requests.post(
-                inference_endpoint,
-                params=params,
-                headers=headers,
-                timeout=30
+            QgsMessageLog.logMessage(
+                f"Request headers prepared. Has JWT token: {bool(self.jwt_token)}",
+                "VEC Plugin",
+                Qgis.Info
             )
-          
+            
+            QgsMessageLog.logMessage(
+                f"Sending POST request to inference endpoint with params: {params}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            QgsMessageLog.logMessage(
+                f"Making HTTP POST request now...",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            try:
+                response = requests.post(
+                    inference_endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=30
+                )
+                QgsMessageLog.logMessage(
+                    f"HTTP request completed. Status code: {response.status_code}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+            except requests.exceptions.Timeout as timeout_err:
+                QgsMessageLog.logMessage(
+                    f"Request timed out after 30 seconds: {self._sanitize_urls(str(timeout_err))}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise
+            except requests.exceptions.ConnectionError as conn_err:
+                QgsMessageLog.logMessage(
+                    f"Connection error during request: {self._sanitize_urls(str(conn_err))}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise
+            
+            QgsMessageLog.logMessage(
+                f"Response received. Status code: {response.status_code}",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            
+            # Log response details before raising for status
+            if response.status_code >= 400:
+                try:
+                    error_detail = response.text[:500]
+                    QgsMessageLog.logMessage(
+                        f"Inference endpoint error response: {self._sanitize_urls(error_detail)}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                except:
+                    QgsMessageLog.logMessage(
+                        f"Inference endpoint returned error status {response.status_code} but no readable error body",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+            
             response.raise_for_status()
-            result = response.json()
-          
+            
+            try:
+                result = response.json()
+                QgsMessageLog.logMessage(
+                    f"Inference response JSON parsed successfully. Keys: {list(result.keys())}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+            except ValueError as json_err:
+                QgsMessageLog.logMessage(
+                    f"Failed to parse inference response as JSON: {json_err}. Response text: {response.text[:200]}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                raise Exception(f"Inference service returned invalid JSON: {json_err}")
+            
             # Extract job_id from response
-            job_id = result.get('job_id') or result.get('jobId')
-          
+            job_id = result.get('job_id') or result.get('jobId') or result.get('jobID')
+            
             if not job_id:
+                QgsMessageLog.logMessage(
+                    f"Inference response missing job_id. Response keys: {list(result.keys())}, "
+                    f"Response: {self._sanitize_urls(str(result))}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
                 raise Exception("Inference service did not return job_id")
+            
+            QgsMessageLog.logMessage(
+                f"Inference job started successfully. Job ID: {job_id}",
+                "VEC Plugin",
+                Qgis.Info
+            )
           
             return job_id
           
-        except requests.exceptions.RequestException:
-            raise Exception("Inference request failed")
-        except Exception:
-            raise Exception("Inference error")
+        except requests.exceptions.ConnectionError as e:
+            error_msg = self._sanitize_urls(str(e))
+            QgsMessageLog.logMessage(
+                f"Inference connection error: {error_msg}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            raise Exception(f"Inference connection failed: {error_msg}")
+        
+        except requests.exceptions.Timeout as e:
+            error_msg = self._sanitize_urls(str(e))
+            QgsMessageLog.logMessage(
+                f"Inference timeout error: {error_msg}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            raise Exception(f"Inference request timed out after 30 seconds: {error_msg}")
+        
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response else None
+            error_detail = ""
+            try:
+                if e.response:
+                    error_detail = e.response.text[:500]
+            except:
+                pass
+            
+            sanitized_error = self._sanitize_urls(error_detail)
+            QgsMessageLog.logMessage(
+                f"Inference HTTP error {status_code}: {sanitized_error}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            
+            if status_code == 401:
+                raise Exception("Authentication failed (401). JWT token may be invalid or expired. Please re-validate your license key.")
+            elif status_code == 403:
+                raise Exception("Access forbidden (403). Your license may not have permission for this operation.")
+            elif status_code == 404:
+                raise Exception(f"File not found (404). File ID {file_id} may not exist or may not be ready yet.")
+            elif status_code == 429:
+                raise Exception("Rate limit exceeded (429). Please wait a moment and try again.")
+            elif status_code >= 500:
+                raise Exception(f"Server error ({status_code}). The inference service encountered an internal error. Please try again later.")
+            else:
+                raise Exception(f"Inference request failed with HTTP {status_code}: {sanitized_error}")
+        
+        except requests.exceptions.RequestException as e:
+            error_msg = self._sanitize_urls(str(e))
+            QgsMessageLog.logMessage(
+                f"Inference request exception: {type(e).__name__}: {error_msg}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            raise Exception(f"Inference request failed: {type(e).__name__} - {error_msg}")
+        
+        except Exception as e:
+            error_msg = self._sanitize_urls(str(e))
+            QgsMessageLog.logMessage(
+                f"Inference unexpected error: {type(e).__name__}: {error_msg}",
+                "VEC Plugin",
+                Qgis.Warning
+            )
+            raise Exception(f"Inference error: {error_msg}")
   
     def _poll_status(self, job_id, progress_callback=None, poll_interval=5, max_wait_time=3600):
         """
@@ -1145,6 +1425,7 @@ class VecInferenceClient:
     def _download_shapefile(self, file_id):
         """
         Download shapefile from /download/shapefile/{file_id} endpoint.
+        Waits for inference to complete by retrying until file is ready.
       
         :param file_id: File ID from upload service (used for GCS path)
         :type file_id: str
@@ -1153,34 +1434,95 @@ class VecInferenceClient:
         """
         download_endpoint = f"{self.service_url}/download/shapefile/{file_id}"
       
-        try:
-            headers = self._get_auth_headers()
-            response = requests.get(download_endpoint, headers=headers, timeout=300, stream=True)
-            response.raise_for_status()
-          
-            # Create temporary directory for shapefile
-            temp_dir = tempfile.mkdtemp()
-            zip_path = os.path.join(temp_dir, 'result.zip')
-          
-            # Download ZIP file
-            with open(zip_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-          
-            # Extract ZIP file
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-          
-            # Find .shp file in extracted contents
-            shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
-          
-            if shp_files:
-                shp_path = os.path.join(temp_dir, shp_files[0])
-                return shp_path
-            else:
-                raise Exception("No shapefile (.shp) found in downloaded ZIP")
+        max_retries = 120  # Allow up to 120 retries for very large files (20-60 minutes)
+        base_delay = 10  # Start with 10 seconds between retries
+        max_delay = 60  # Cap delay at 60 seconds
+        
+        for attempt in range(max_retries):
+            try:
+                headers = self._get_auth_headers()
+                response = requests.get(download_endpoint, headers=headers, timeout=300, stream=True)
+                response.raise_for_status()
               
-        except requests.exceptions.RequestException:
-            raise Exception("Download request failed")
-        except Exception:
-            raise Exception("Download error")
+                # Create temporary directory for shapefile
+                temp_dir = tempfile.mkdtemp()
+                zip_path = os.path.join(temp_dir, 'result.zip')
+              
+                # Download ZIP file
+                with open(zip_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+              
+                # Extract ZIP file
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+              
+                # Find .shp file in extracted contents
+                shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
+              
+                if shp_files:
+                    shp_path = os.path.join(temp_dir, shp_files[0])
+                    return shp_path
+                else:
+                    raise Exception("No shapefile (.shp) found in downloaded ZIP")
+            
+            except requests.exceptions.HTTPError as e:
+                # If 404 or 503, inference may still be processing - retry
+                if e.response.status_code in (404, 503) and attempt < max_retries - 1:
+                    # Gradually increase delay: 10s for first 20, then 15s, 20s, 25s, 30s, then cap at 30s
+                    if attempt < 20:
+                        delay = 10
+                    elif attempt < 40:
+                        delay = 15
+                    elif attempt < 60:
+                        delay = 20
+                    elif attempt < 80:
+                        delay = 25
+                    elif attempt < 100:
+                        delay = 30
+                    else:
+                        delay = max_delay  # 60 seconds for final attempts
+                    QgsMessageLog.logMessage(
+                        f"Waiting for inference to complete (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...",
+                        "VEC Plugin",
+                        Qgis.Info
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Other HTTP errors or max retries reached
+                    raise Exception(f"Download failed: HTTP {e.response.status_code}")
+            
+            except requests.exceptions.RequestException as e:
+                # Network errors - retry with backoff
+                if attempt < max_retries - 1:
+                    # Same delay progression as HTTP errors
+                    if attempt < 20:
+                        delay = 10
+                    elif attempt < 40:
+                        delay = 15
+                    elif attempt < 60:
+                        delay = 20
+                    elif attempt < 80:
+                        delay = 25
+                    elif attempt < 100:
+                        delay = 30
+                    else:
+                        delay = max_delay  # 60 seconds for final attempts
+                    error_msg = self._sanitize_urls(str(e))
+                    QgsMessageLog.logMessage(
+                        f"Download connection error (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    raise Exception(f"Download request failed after {max_retries} attempts: {type(e).__name__}")
+            
+            except Exception as e:
+                # Other errors (file extraction, etc.) - don't retry
+                raise Exception(f"Download error: {str(e)}")
+        
+        # Should never reach here, but just in case
+        raise Exception(f"Download failed after {max_retries} attempts")

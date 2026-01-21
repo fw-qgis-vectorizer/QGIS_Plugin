@@ -203,7 +203,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             from .vec_inference_client import VecInferenceClient
             # Use hardcoded service URL for auth endpoint
-            INFERENCE_SERVICE_URL = "https://inference.usefieldwatch.com"
+            INFERENCE_SERVICE_URL = "https://inference-service-proxy-xt7fd24wta-uc.a.run.app"
             temp_client = VecInferenceClient(INFERENCE_SERVICE_URL)
             token, expiry = temp_client.validate_license_key(license_key)
             
