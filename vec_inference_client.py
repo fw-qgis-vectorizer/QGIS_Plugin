@@ -271,16 +271,6 @@ class VecInferenceClient:
                     "VEC Plugin",
                     Qgis.Info
                 )
-                QgsMessageLog.logMessage(
-                    f"File ID: {file_id}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
-                QgsMessageLog.logMessage(
-                    f"Service URL: {self._sanitize_urls(self.service_url)}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
               
                 job_id = self._start_inference(file_id)
               
@@ -1051,12 +1041,6 @@ class VecInferenceClient:
         :returns: job_id from inference service
         :rtype: str
         """
-        QgsMessageLog.logMessage(
-            f"_start_inference called with file_id: {file_id}",
-            "VEC Plugin",
-            Qgis.Info
-        )
-        
         # Build query parameters
         params = {
             'prompt': prompt,
@@ -1066,40 +1050,12 @@ class VecInferenceClient:
             'remove_overlaps': remove_overlaps,
             'overlap_method': overlap_method
         }
-        QgsMessageLog.logMessage(
-            f"Inference parameters: prompt={prompt}, confidence={confidence}, alpha={alpha}, "
-            f"iou_threshold={iou_threshold}, remove_overlaps={remove_overlaps}, overlap_method={overlap_method}",
-            "VEC Plugin",
-            Qgis.Info
-        )
       
         # Call inference endpoint
         inference_endpoint = f"{self.service_url}/infer/qgis/{file_id}"
-        QgsMessageLog.logMessage(
-            f"Calling inference endpoint: {self._sanitize_urls(inference_endpoint)}",
-            "VEC Plugin",
-            Qgis.Info
-        )
         
         try:
             headers = self._get_auth_headers()
-            QgsMessageLog.logMessage(
-                f"Request headers prepared. Has JWT token: {bool(self.jwt_token)}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
-            QgsMessageLog.logMessage(
-                f"Sending POST request to inference endpoint with params: {params}",
-                "VEC Plugin",
-                Qgis.Info
-            )
-            
-            QgsMessageLog.logMessage(
-                f"Making HTTP POST request now...",
-                "VEC Plugin",
-                Qgis.Info
-            )
             
             try:
                 response = requests.post(
@@ -1154,11 +1110,6 @@ class VecInferenceClient:
             
             try:
                 result = response.json()
-                QgsMessageLog.logMessage(
-                    f"Inference response JSON parsed successfully. Keys: {list(result.keys())}",
-                    "VEC Plugin",
-                    Qgis.Info
-                )
             except ValueError as json_err:
                 QgsMessageLog.logMessage(
                     f"Failed to parse inference response as JSON: {json_err}. Response text: {response.text[:200]}",

@@ -297,8 +297,8 @@ class VecPlugin:
                 return
             
             # Hardcoded service URLs
-            INFERENCE_SERVICE_URL = "https://inference-service-proxy-xt7fd24wta-uc.a.run.app"
-            UPLOAD_SERVICE_URL = "https://upload-service-xt7fd24wta-uc.a.run.app"
+            INFERENCE_SERVICE_URL = "https://inference.usefieldwatch.com/"
+            UPLOAD_SERVICE_URL = "https://upload.usefieldwatch.com/"
             
             # Initialize inference client with hardcoded URLs and JWT token
             try:
