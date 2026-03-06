@@ -8,6 +8,7 @@ A QGIS plugin that integrates with the VEC inference service for automated build
 - **Automated Processing Pipeline**: Uploads raster data, runs AI inference, and downloads results automatically
 - **Progress Tracking**: Real-time progress updates during processing
 - **Automatic Layer Loading**: Results are automatically loaded into QGIS as a vector layer
+- **Order Drone Imagery**: Request drone imagery (orthomosaic, DSM, or point cloud) for an area from within QGIS; set AOI on the map or by coordinates, choose resolution and deliverable, and submit your contact details
 
 ## Requirements
 
@@ -103,11 +104,48 @@ If the plugin is published to the QGIS Plugin Repository:
    - The map will automatically zoom to the results
    - Check the QGIS message bar for processing status
 
+## Order Drone Imagery
+
+You can request drone imagery for an area directly from the plugin. Go to **Plugins → FieldWatch Vectorizer → Order drone imagery** to open the order dialog.
+
+### Define the area (AOI)
+
+- **Draw on the map**  
+  Click **Draw AOI on map**. On the embedded map, left-click to add polygon vertices and right-click to finish (you need at least 3 points). The area is shown in hectares. Use **Clear** to remove the shape and start over.
+
+- **Or enter coordinates**  
+  Under **AOI by coordinates (lat/lng, WGS84)** enter latitude and longitude and click **Add point**. You can add up to 6 points (minimum 3 for a polygon). Click **Use points** to set the AOI from these coordinates; the map will zoom to the area. Use **Clear points** to remove the list and start again.
+
+### Options
+
+- **Resolution (GSD)**  
+  - 1 cm GSD  
+  - 2 cm GSD  
+  - 5 cm GSD  
+
+- **Deliverable**  
+  - Orthomosaic  
+  - DSM  
+  - Point cloud  
+
+After you set an AOI, a **price estimate** is shown (based on $300/km²).
+
+### Contact details
+
+- **Name** (required)  
+- **Company** (optional)  
+- **Email** (required)  
+- **Phone** (optional)  
+
+### Submit
+
+Click **Submit request**. Your choices and contact details are sent to FieldWatch. A confirmation screen summarizes what was submitted. FieldWatch will follow up with you to confirm the order and next steps.
+
 ## Configuration
 
 The plugin uses hardcoded service endpoints:
 - **Upload Service**: `https://upload.usefieldwatch.com`
-- **Inference Service**: `https://inference-service-proxy-xt7fd24wta-uc.a.run.app`
+- **Inference Service**: `https://inference.usefieldwatch.com`
 
 These are configured in the code and cannot be changed via the UI.
 
