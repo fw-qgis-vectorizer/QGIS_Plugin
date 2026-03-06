@@ -24,14 +24,15 @@ from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QThread, 
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QDialogButtonBox, QDialog
 from qgis.core import (
-    QgsVectorLayer, QgsProject, QgsMessageLog, 
-    Qgis
+    QgsVectorLayer, QgsProject, QgsMessageLog,
+    QgsDistanceArea, Qgis
 )
 
 # Initialize Qt resources from file resources.py
 from .resources import *
 # Import the code for the dialog
 from .vec_plugin_dialog import VecPluginDialog
+from .order_imagery_dialog import OrderImageryDialog
 from .vec_inference_client import VecInferenceClient
 import os.path
 import tempfile
@@ -203,6 +204,13 @@ class VecPlugin:
             callback=self.run,
             parent=self.iface.mainWindow())
 
+        self.add_action(
+            icon_path,
+            text=self.tr(u'Order drone imagery'),
+            callback=self.run_order_imagery,
+            add_to_toolbar=False,
+            parent=self.iface.mainWindow())
+
         # will be set False in run()
         self.first_start = True
 
@@ -242,6 +250,14 @@ class VecPlugin:
         self.dlg.show()
         # Run the dialog event loop
         self.dlg.exec_()
+
+    def run_order_imagery(self):
+        """Open the Order drone imagery dialog."""
+        if not hasattr(self, 'order_imagery_dlg') or self.order_imagery_dlg is None:
+            self.order_imagery_dlg = OrderImageryDialog(iface=self.iface)
+        self.order_imagery_dlg.show()
+        self.order_imagery_dlg.raise_()
+        self.order_imagery_dlg.activateWindow()
     
     def _start_processing(self):
         """Start the inference processing."""
@@ -295,7 +311,26 @@ class VecPlugin:
                 )
                 self._is_processing = False
                 return
-            
+
+            # Reject crop area > 5.5 ha for inference
+            crs = self.iface.mapCanvas().mapSettings().destinationCrs() if self.iface and self.iface.mapCanvas() else QgsProject.instance().crs()
+            if not crs.isValid():
+                crs = QgsProject.instance().crs()
+            da = QgsDistanceArea()
+            da.setSourceCrs(crs, QgsProject.instance().transformContext())
+            da.setEllipsoid(crs.ellipsoidAcronym())
+            area_m2 = da.measureArea(crop_geometry)
+            area_ha = area_m2 / 10000.0
+            if area_ha > 5.5:
+                self.iface.messageBar().pushMessage(
+                    "Error",
+                    "Crop area is {:.2f} ha. Maximum allowed for inference is 5.5 ha. Please draw a smaller area.".format(area_ha),
+                    level=1,
+                    duration=8
+                )
+                self._is_processing = False
+                return
+
             # Hardcoded service URLs
             INFERENCE_SERVICE_URL = "https://inference.usefieldwatch.com/"
             UPLOAD_SERVICE_URL = "https://upload.usefieldwatch.com/"

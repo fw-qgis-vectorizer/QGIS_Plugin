@@ -6,12 +6,12 @@
 [general]
 name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
-description=Integration with VEC inference service for building detection
-version=1.0.1
+description=Vectorization inference service for building detection
+version=2.0.0
 author=FieldWatch
 email=support@usefieldwatch.com
 
-about=Integration with VEC inference service for building detection. Requires 'requests' Python library (install via pip if not available in OSGeo4W Python).
+about=Generate vector masks of buildings from Geotiff images.
 
 tracker=https://github.com/fw-qgis-vectorizer/QGIS_Plugin/issues
 repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
@@ -22,7 +22,7 @@ repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
 
 hasProcessingProvider=no
 # Uncomment the following line and add your changelog:
-changelog=Updated service endpoints to use custom domains. Initial release with building detection functionality.
+changelog=You can now request drone imagery from the plugin (Plugins → FieldWatch Vectorizer → Order drone imagery) instead of switching to the website, and Request limits are now clearly defined, mitigating failures.
 
 # Tags are comma separated with spaces allowed
 tags=raster,vector,ai,machine learning,building detection,segmentation,inference

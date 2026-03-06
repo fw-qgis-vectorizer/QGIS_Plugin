@@ -107,7 +107,7 @@ If the plugin is published to the QGIS Plugin Repository:
 
 The plugin uses hardcoded service endpoints:
 - **Upload Service**: `https://upload.usefieldwatch.com`
-- **Inference Service**: `https://inference.usefieldwatch.com`
+- **Inference Service**: `https://inference-service-proxy-xt7fd24wta-uc.a.run.app`
 
 These are configured in the code and cannot be changed via the UI.
 

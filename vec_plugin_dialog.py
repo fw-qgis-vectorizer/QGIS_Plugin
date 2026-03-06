@@ -25,8 +25,11 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets, QtCore, QtGui
+from qgis.PyQt.QtCore import QUrl
+from qgis.PyQt.QtGui import QDesktopServices
 from qgis.core import QgsProject, QgsGeometry, QgsWkbTypes, QgsPointXY
 from qgis.gui import QgsMapToolCapture, QgsRubberBand
+from .order_imagery_dialog import OrderImageryDialog
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -100,6 +103,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.crop_geometry = None
         self.map_tool = None
         self.previous_map_tool = None
+        self.order_imagery_dialog = None
         
         # Set up the user interface from Designer through FORM_CLASS.
         # After self.setupUi() you can access any designer object by doing
@@ -129,8 +133,22 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # Connect license validation button
         self.validateLicenseButton.clicked.connect(self.validate_license)
         
+        # Connect Get License Key button
+        self.getLicenseKeyButton.clicked.connect(self.open_fieldwatch_website)
+        
+        # Connect Order drone imagery button
+        if hasattr(self, "orderImageryButton"):
+            self.orderImageryButton.clicked.connect(self.open_order_imagery_dialog)
+        
         # Connect signal
         self.polygon_drawn.connect(self.on_polygon_drawn)
+
+        # Add Refresh button to reset plugin state
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.button_box.addButton(
+            self.refresh_button, QtWidgets.QDialogButtonBox.ResetRole
+        )
+        self.refresh_button.clicked.connect(self._refresh_plugin_state)
         
         # Disable OK button initially - polygon must be drawn first AND license must be validated
         ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
@@ -180,6 +198,23 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     def get_jwt_token(self):
         """Get the JWT token."""
         return self.jwt_token
+    
+    def open_order_imagery_dialog(self):
+        """Open the Order drone imagery dialog."""
+        if not self.iface:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Error",
+                "Cannot open order dialog: QGIS interface not available."
+            )
+            return
+        
+        if self.order_imagery_dialog is None:
+            self.order_imagery_dialog = OrderImageryDialog(iface=self.iface, parent=self)
+        
+        self.order_imagery_dialog.show()
+        self.order_imagery_dialog.raise_()
+        self.order_imagery_dialog.activateWindow()
     
     def validate_license(self):
         """Validate license key and get JWT token."""
@@ -251,6 +286,10 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         finally:
             self.validateLicenseButton.setEnabled(True)
             self.validateLicenseButton.setText("Validate")
+    
+    def open_fieldwatch_website(self):
+        """Open FieldWatch website in the default browser."""
+        QDesktopServices.openUrl(QUrl("https://usefieldwatch.com/"))
     
     def start_polygon_drawing(self):
         """Start polygon drawing on the map canvas."""
@@ -379,3 +418,43 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 else:
                     canvas.unsetMapTool(self.map_tool)
         super(VecPluginDialog, self).closeEvent(event)
+
+    def _refresh_plugin_state(self):
+        """
+        Reset the main dialog and related state so it behaves like a fresh open.
+        """
+        # 1) Reset crop polygon and status
+        try:
+            self.clear_polygon()
+        except Exception:
+            pass
+
+        # 2) Repopulate input layers
+        try:
+            self.populate_layers()
+        except Exception:
+            pass
+
+        # 3) Reset status / progress
+        try:
+            self.statusLabel.setText("Ready")
+        except Exception:
+            pass
+        try:
+            self.progressBar.setVisible(False)
+            self.progressBar.setValue(0)
+        except Exception:
+            pass
+
+        # 4) Disable OK until conditions are met again
+        ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_button:
+            ok_button.setEnabled(False)
+
+        # 5) Reset / recreate the Order Imagery dialog so it opens fresh next time
+        if self.order_imagery_dialog is not None:
+            try:
+                self.order_imagery_dialog.close()
+            except Exception:
+                pass
+            self.order_imagery_dialog = None
