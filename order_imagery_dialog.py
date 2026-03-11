@@ -4,6 +4,7 @@ Order drone imagery dialog for FieldWatch VEC plugin.
 Option 1: Embedded QgsMapCanvas with a minimal custom QgsMapTool (not QgsMapToolCapture)
 to avoid native crash. User draws AOI on the map inside the dialog.
 """
+import math
 import requests
 from qgis.PyQt import QtWidgets, QtCore
 from qgis.PyQt.QtCore import Qt
@@ -130,6 +131,7 @@ class OrderImageryDialog(QDialog):
         self._basemap_layer = None  # keep reference so layer is not gc'd
         self.manual_points = []  # list of (lat, lng) tuples entered manually
         self._manual_points_rb = None  # rubber band for manual-points polygon
+        self._goto_point_rb = None  # rubber band showing the "Go to point" location
         self.setWindowTitle("Order Drone Imagery")
         self.setMinimumSize(520, 720)
         self._build_ui()
@@ -191,6 +193,10 @@ class OrderImageryDialog(QDialog):
         self.add_point_btn = QPushButton("Add point")
         self.add_point_btn.clicked.connect(self._add_point_from_fields)
         coords_layout.addRow(self.add_point_btn)
+
+        self.goto_point_btn = QPushButton("Go to point")
+        self.goto_point_btn.clicked.connect(self._go_to_point)
+        coords_layout.addRow(self.goto_point_btn)
 
         self.points_label = QLabel("No points added yet.")
         self.points_label.setWordWrap(True)
@@ -327,6 +333,7 @@ class OrderImageryDialog(QDialog):
         self.draw_aoi_btn.setEnabled(True)
 
         if geometry and not geometry.isEmpty():
+            self._clear_goto_point_marker()
             self.aoi_geometry = geometry
             crs = self.canvas.mapSettings().destinationCrs()
             if not crs.isValid():
@@ -364,6 +371,7 @@ class OrderImageryDialog(QDialog):
         if self._manual_points_rb is not None:
             self._manual_points_rb.reset()
             self._manual_points_rb = None
+        self._clear_goto_point_marker()
 
     def _update_price(self):
         """Update price estimate: $300 per km²."""
@@ -426,6 +434,106 @@ class OrderImageryDialog(QDialog):
         if len(self.manual_points) >= 6 and hasattr(self, "add_point_btn"):
             self.add_point_btn.setEnabled(False)
 
+    def _go_to_point(self):
+        """Pan/zoom the embedded map to a single lat/lng point (WGS84) without changing the AOI."""
+        # Prefer the current text fields; fall back to first manual point if fields are empty
+        lat_text = self.point_lat_edit.text().strip() if hasattr(self, "point_lat_edit") else ""
+        lng_text = self.point_lng_edit.text().strip() if hasattr(self, "point_lng_edit") else ""
+
+        if lat_text and lng_text:
+            try:
+                lat = float(lat_text)
+                lng = float(lng_text)
+            except (TypeError, ValueError):
+                QMessageBox.warning(
+                    self,
+                    "Invalid coordinates",
+                    "Please enter numeric latitude and longitude values."
+                )
+                return
+        elif self.manual_points:
+            # Use the first manually added point
+            lat, lng = self.manual_points[0]
+        else:
+            QMessageBox.warning(
+                self,
+                "No coordinates",
+                "Enter a latitude/longitude or add at least one point first."
+            )
+            return
+
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+            QMessageBox.warning(
+                self,
+                "Invalid coordinates",
+                "Latitude must be between -90 and 90, longitude between -180 and 180."
+            )
+            return
+
+        if not self.canvas:
+            return
+
+        # Build point in WGS84 and transform to the canvas CRS
+        src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        dest_crs = self.canvas.mapSettings().destinationCrs()
+        if not dest_crs.isValid():
+            dest_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+
+        xform = QgsCoordinateTransform(
+            src_crs,
+            dest_crs,
+            QgsProject.instance().transformContext()
+        )
+
+        pt_wgs84 = QgsPointXY(lng, lat)
+        try:
+            pt_canvas = xform.transform(pt_wgs84)
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Transform error",
+                f"Could not transform coordinates to map CRS: {e}"
+            )
+            return
+
+        # Create a small box around the point so the user can see context
+        # Values are in the canvas CRS; for Web Mercator this is in meters.
+        half_size = 1000  # ~1 km in EPSG:3857
+        extent = QgsRectangle(
+            pt_canvas.x() - half_size,
+            pt_canvas.y() - half_size,
+            pt_canvas.x() + half_size,
+            pt_canvas.y() + half_size,
+        )
+        self.canvas.setExtent(extent)
+
+        # Draw a visible marker at the exact point (small circle in map units)
+        self._clear_goto_point_marker()
+        radius = 25  # meters in Web Mercator; visible at ~1 km extent
+        num_segments = 24
+        points = []
+        for i in range(num_segments + 1):
+            angle = 2 * math.pi * i / num_segments
+            dx = radius * math.cos(angle)
+            dy = radius * math.sin(angle)
+            points.append(QgsPointXY(pt_canvas.x() + dx, pt_canvas.y() + dy))
+        points.append(points[0])  # close ring
+        geom = QgsGeometry.fromPolygonXY([points])
+        self._goto_point_rb = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+        self._goto_point_rb.setColor(Qt.blue)
+        self._goto_point_rb.setWidth(2)
+        self._goto_point_rb.setFillColor(QColor(0, 0, 255, 80))
+        self._goto_point_rb.setToGeometry(geom, None)
+        self._goto_point_rb.show()
+
+        self.canvas.refresh()
+
+    def _clear_goto_point_marker(self):
+        """Remove the 'Go to point' marker from the map."""
+        if self._goto_point_rb is not None:
+            self._goto_point_rb.reset()
+            self._goto_point_rb = None
+
     def _apply_coords_aoi(self):
         """Use manually added lat/lng points (WGS84) to define AOI and draw it on the Esri map."""
         if len(self.manual_points) < 3:
@@ -461,6 +569,7 @@ class OrderImageryDialog(QDialog):
             return
 
         self.aoi_geometry = geom_canvas
+        self._clear_goto_point_marker()
 
         # Draw polygon on embedded canvas (clear previous manual polygon if any)
         if self._manual_points_rb is None:
