@@ -141,13 +141,6 @@ After you set an AOI, a **price estimate** is shown (based on $300/km²).
 
 Click **Submit request**. Your choices and contact details are sent to FieldWatch. A confirmation screen summarizes what was submitted. FieldWatch will follow up with you to confirm the order and next steps.
 
-## Configuration
-
-The plugin uses hardcoded service endpoints:
-- **Upload Service**: `https://upload.usefieldwatch.com`
-- **Inference Service**: `https://inference.usefieldwatch.com`
-
-These are configured in the code and cannot be changed via the UI.
 
 ## Troubleshooting
 
