@@ -41,30 +41,32 @@ import tempfile
 class InferenceWorker(QThread):
     """Worker thread for running inference asynchronously."""
     
-    finished = pyqtSignal(str)  # Shapefile path
+    finished = pyqtSignal(object)  # Result payload
     error = pyqtSignal(str)
     progress = pyqtSignal(int, str)
     
-    def __init__(self, client, raster_layer, crop_geometry=None, crop_geometry_crs=None):
+    def __init__(self, client, raster_layer, crop_geometry=None, crop_geometry_crs=None, detection_type="building"):
         QThread.__init__(self)
         self.client = client
         self.raster_layer = raster_layer
         self.crop_geometry = crop_geometry
         self.crop_geometry_crs = crop_geometry_crs
+        self.detection_type = detection_type
     
     def run(self):
         try:
             def progress_callback(value, message):
                 self.progress.emit(value, message)
             
-            shapefile_path = self.client.process_raster_layer(
+            result_payload = self.client.process_raster_layer(
                 self.raster_layer,
                 progress_callback,
                 self.crop_geometry,
-                crop_geometry_crs=self.crop_geometry_crs
+                crop_geometry_crs=self.crop_geometry_crs,
+                detection_type=self.detection_type
             )
             
-            self.finished.emit(shapefile_path)
+            self.finished.emit(result_payload)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -279,6 +281,7 @@ class VecPlugin:
             output_name = self.dlg.get_output_layer_name()
             crop_geometry = self.dlg.get_crop_geometry()
             jwt_token = self.dlg.get_jwt_token()
+            detection_type = self.dlg.get_detection_type()
             
             # Validate license is validated
             if not jwt_token:
@@ -372,7 +375,13 @@ class VecPlugin:
                 canvas_crs = project.crs() if project else None
             
             # Create worker thread
-            self.worker = InferenceWorker(client, input_layer, crop_geometry, crop_geometry_crs=canvas_crs)
+            self.worker = InferenceWorker(
+                client,
+                input_layer,
+                crop_geometry,
+                crop_geometry_crs=canvas_crs,
+                detection_type=detection_type
+            )
             self.worker.progress.connect(self._on_progress)
             self.worker.finished.connect(self._on_finished)
             self.worker.error.connect(self._on_error)
@@ -419,17 +428,34 @@ class VecPlugin:
         self.dlg.progressBar.setValue(value)
         self.dlg.statusLabel.setText(message)
     
-    def _on_finished(self, shapefile_path):
+    def _on_finished(self, result_payload):
         """Handle successful inference completion."""
         try:
             output_name = self._processing_output_name
             input_layer = self._processing_input_layer
+
+            # Backward compatibility: older client returns shapefile path string.
+            if isinstance(result_payload, dict):
+                shapefile_path = result_payload.get("shapefile_path")
+                summary_csv_path = result_payload.get("summary_csv_path")
+            else:
+                shapefile_path = result_payload
+                summary_csv_path = None
+            if not shapefile_path:
+                raise Exception("Inference did not return a shapefile path.")
             
             # Create vector layer from shapefile
             vector_layer = self._create_vector_layer(shapefile_path, output_name, input_layer.crs())
             
             # Add layer to QGIS
             QgsProject.instance().addMapLayer(vector_layer)
+
+            # Optional panel summary table for /roofnel responses
+            if summary_csv_path:
+                summary_layer_name = f"{output_name}_panels_summary"
+                csv_layer = self._create_csv_table_layer(summary_csv_path, summary_layer_name)
+                if csv_layer and csv_layer.isValid():
+                    QgsProject.instance().addMapLayer(csv_layer)
             
             # Zoom to layer
             self.iface.mapCanvas().setExtent(vector_layer.extent())
@@ -440,7 +466,7 @@ class VecPlugin:
             
             self.iface.messageBar().pushMessage(
                 "Success", 
-                f"Created layer '{output_name}' with {feature_count} building(s) detected.",
+                f"Created layer '{output_name}' with {feature_count} feature(s).",
                 level=0,
                 duration=5
             )
@@ -569,3 +595,28 @@ class VecPlugin:
         vector_layer.setCrs(crs)
         
         return vector_layer
+
+    def _create_csv_table_layer(self, csv_path, layer_name):
+        """
+        Create a non-spatial QGIS table layer from CSV path.
+
+        :param csv_path: Path to CSV file
+        :type csv_path: str
+        :param layer_name: Name for the table layer
+        :type layer_name: str
+        :returns: QGIS vector layer table
+        :rtype: QgsVectorLayer
+        """
+        # Prefer delimited text provider as a plain attribute table.
+        csv_uri = "file:///{}?type=csv&detectTypes=yes&geomType=none".format(
+            csv_path.replace("\\", "/")
+        )
+        table_layer = QgsVectorLayer(csv_uri, layer_name, "delimitedtext")
+        if table_layer.isValid():
+            return table_layer
+
+        # Fallback to OGR CSV driver.
+        table_layer = QgsVectorLayer(csv_path, layer_name, "ogr")
+        if not table_layer.isValid():
+            raise Exception(f"Failed to create summary CSV table layer from: {csv_path}")
+        return table_layer

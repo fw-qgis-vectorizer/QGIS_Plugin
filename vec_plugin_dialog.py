@@ -70,6 +70,8 @@ class PolygonCaptureTool(QgsMapToolCapture):
                 self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
                 self.rubber_band.setColor(QtCore.Qt.red)
                 self.rubber_band.setWidth(2)
+                # Match order imagery dialog styling: semi-transparent red fill
+                self.rubber_band.setFillColor(QtGui.QColor(255, 0, 0, 60))
             if len(self.points) > 1:
                 self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
                 for p in self.points:
@@ -122,6 +124,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Set default output layer name
         self.outputLayerLineEdit.setText("Building_Detections")
+        if hasattr(self, "detectionTypeCombo"):
+            self.detectionTypeCombo.setCurrentText("Building")
         
         # Hide progress bar initially
         self.progressBar.setVisible(False)
@@ -190,6 +194,13 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     def get_crop_geometry(self):
         """Get the crop polygon geometry."""
         return self.crop_geometry
+
+    def get_detection_type(self):
+        """Get selected detection type."""
+        if hasattr(self, "detectionTypeCombo"):
+            text = self.detectionTypeCombo.currentText().strip().lower()
+            return "solar_panel" if text == "solar panel" else "building"
+        return "building"
     
     def get_license_key(self):
         """Get the license key."""

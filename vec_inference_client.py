@@ -26,6 +26,7 @@ import time
 import zipfile
 import re
 import logging
+from urllib.parse import urljoin
 from qgis import processing
 from qgis.core import (
    QgsMessageLog, Qgis, QgsRasterPipe,
@@ -145,7 +146,14 @@ class VecInferenceClient:
             headers['Authorization'] = f'Bearer {self.jwt_token}'
         return headers
   
-    def process_raster_layer(self, raster_layer, progress_callback=None, crop_geometry=None, crop_geometry_crs=None):
+    def process_raster_layer(
+        self,
+        raster_layer,
+        progress_callback=None,
+        crop_geometry=None,
+        crop_geometry_crs=None,
+        detection_type="building"
+    ):
         """
         Process a QGIS raster layer through the inference pipeline.
         Uses hardcoded compression settings.
@@ -158,8 +166,10 @@ class VecInferenceClient:
         :type crop_geometry: QgsGeometry
         :param crop_geometry_crs: CRS of the canvas where geometry was drawn
         :type crop_geometry_crs: QgsCoordinateReferenceSystem
-        :returns: Path to shapefile results
-        :rtype: str
+        :param detection_type: Detection mode ("building" or "solar_panel")
+        :type detection_type: str
+        :returns: Result payload with shapefile and optional summary CSV paths
+        :rtype: dict
         """
         try:
             # Crop raster - geometry is now mandatory
@@ -262,7 +272,7 @@ class VecInferenceClient:
                 if not file_id:
                     raise Exception("Failed to get file_id from upload service")
               
-                # Step 2: Call /infer/qgis/{file_id} endpoint
+                # Step 2: Call inference endpoint based on detection type
                 if progress_callback:
                     progress_callback(25, "Starting inference...")
               
@@ -272,10 +282,44 @@ class VecInferenceClient:
                     Qgis.Info
                 )
               
-                job_id = self._start_inference(file_id)
-              
-                if not job_id:
+                inference_result = self._start_inference(file_id, detection_type=detection_type)
+                if not isinstance(inference_result, dict):
+                    raise Exception("Inference service returned an invalid response payload")
+
+                outputs = inference_result.get('outputs') or {}
+                shapefile_target = None
+                summary_csv_target = None
+                job_id = (
+                    inference_result.get('job_id')
+                    or inference_result.get('jobId')
+                    or inference_result.get('jobID')
+                )
+                if not job_id and not outputs:
                     raise Exception("Failed to start inference job")
+
+                # /roofnel flow:
+                # POST /roofnel/{file_id} -> get job_id
+                # GET /status/{job_id} until completed
+                # Use completed status payload result key for shapefile path
+                if detection_type == "solar_panel":
+                    if not job_id:
+                        raise Exception("Solar panel inference did not return job_id.")
+                    if progress_callback:
+                        progress_callback(35, "Waiting for panel inference to complete...")
+                    status_data = self._poll_status(job_id, progress_callback=progress_callback)
+                    results = status_data.get('results') or {}
+                    output_files = results.get('output_files') or {}
+                    shapefile_target = self._resolve_shapefile_target(self.service_url, output_files)
+                    summary_csv_target = self._resolve_summary_csv_target(self.service_url, output_files)
+                    if not shapefile_target:
+                        raise Exception(
+                            "Completed status payload did not include a valid panel shapefile "
+                            "download target in results.output_files."
+                        )
+                else:
+                    # For /infer, if outputs are included directly, use the same resolver logic.
+                    shapefile_target = self._resolve_shapefile_target(self.service_url, outputs)
+                    summary_csv_target = self._resolve_summary_csv_target(self.service_url, outputs)
               
                 # Step 3: Download shapefile (using file_id from upload)
                 if progress_callback:
@@ -287,7 +331,28 @@ class VecInferenceClient:
                     Qgis.Info
                 )
               
-                shapefile_path = self._download_shapefile(file_id)
+                if shapefile_target:
+                    shapefile_path = self._download_shapefile_from_url(shapefile_target)
+                else:
+                    shapefile_path = self._download_shapefile(file_id)
+
+                summary_csv_path = None
+                if summary_csv_target:
+                    # CSV is optional for visualization; do not fail the whole job if CSV download fails.
+                    try:
+                        if isinstance(summary_csv_target, tuple) and len(summary_csv_target) == 2:
+                            target_kind, _target_value = summary_csv_target
+                            if target_kind == "gcs":
+                                # Backend guidance: use API CSV download path instead of raw gs://.
+                                summary_csv_target = ("http", f"{self.service_url}/download/csv/{file_id}")
+                        summary_csv_path = self._download_summary_csv_from_url(summary_csv_target)
+                    except Exception as csv_err:
+                        QgsMessageLog.logMessage(
+                            f"Panels summary CSV download skipped: {self._sanitize_urls(str(csv_err))}",
+                            "VEC Plugin",
+                            Qgis.Warning
+                        )
+                        summary_csv_path = None
               
                 QgsMessageLog.logMessage(
                     "Shapefile downloaded successfully",
@@ -298,7 +363,10 @@ class VecInferenceClient:
                 if progress_callback:
                     progress_callback(100, "Complete!")
               
-                return shapefile_path
+                return {
+                    "shapefile_path": shapefile_path,
+                    "summary_csv_path": summary_csv_path
+                }
               
             finally:
                 # Clean up temp raster file
@@ -1025,10 +1093,19 @@ class VecInferenceClient:
             )
             raise Exception(f"Upload error: {error_msg}")
   
-    def _start_inference(self, file_id, prompt="building", confidence=0.3, alpha=0.5,
-                        iou_threshold=0.15, remove_overlaps=True, overlap_method="clip"):
+    def _start_inference(
+        self,
+        file_id,
+        prompt="building",
+        confidence=0.3,
+        alpha=0.5,
+        iou_threshold=0.15,
+        remove_overlaps=True,
+        overlap_method="clip",
+        detection_type="building"
+    ):
         """
-        Start inference job by calling /infer/qgis/{file_id} endpoint.
+        Start inference job using building or solar panel endpoint.
       
         :param file_id: File ID from upload service
         :type file_id: str
@@ -1038,21 +1115,25 @@ class VecInferenceClient:
         :param iou_threshold: IoU threshold for merging (default: 0.15)
         :param remove_overlaps: Remove overlaps (default: True)
         :param overlap_method: Overlap method: "clip" or "merge" (default: "clip")
-        :returns: job_id from inference service
-        :rtype: str
+        :param detection_type: Detection mode ("building" or "solar_panel")
+        :type detection_type: str
+        :returns: Inference response payload
+        :rtype: dict
         """
-        # Build query parameters
-        params = {
-            'prompt': prompt,
-            'confidence': confidence,
-            'alpha': alpha,
-            'iou_threshold': iou_threshold,
-            'remove_overlaps': remove_overlaps,
-            'overlap_method': overlap_method
-        }
-      
-        # Call inference endpoint
-        inference_endpoint = f"{self.service_url}/infer/qgis/{file_id}"
+        if detection_type == "solar_panel":
+            # /roofnel is panel-only; backend uses a fixed prompt internally.
+            params = None
+            inference_endpoint = f"{self.service_url}/roofnel/{file_id}"
+        else:
+            params = {
+                'prompt': prompt,
+                'confidence': confidence,
+                'alpha': alpha,
+                'iou_threshold': iou_threshold,
+                'remove_overlaps': remove_overlaps,
+                'overlap_method': overlap_method
+            }
+            inference_endpoint = f"{self.service_url}/infer/qgis/{file_id}"
         
         try:
             headers = self._get_auth_headers()
@@ -1118,25 +1199,33 @@ class VecInferenceClient:
                 )
                 raise Exception(f"Inference service returned invalid JSON: {json_err}")
             
-            # Extract job_id from response
+            # Accept both classic and panel response payloads.
             job_id = result.get('job_id') or result.get('jobId') or result.get('jobID')
-            
-            if not job_id:
+            outputs = result.get('outputs') or {}
+            has_shapefile_output = bool(outputs.get('shapefile'))
+            if not job_id and not has_shapefile_output:
                 QgsMessageLog.logMessage(
-                    f"Inference response missing job_id. Response keys: {list(result.keys())}, "
+                    f"Inference response missing job_id/outputs.shapefile. Response keys: {list(result.keys())}, "
                     f"Response: {self._sanitize_urls(str(result))}",
                     "VEC Plugin",
                     Qgis.Warning
                 )
-                raise Exception("Inference service did not return job_id")
+                raise Exception("Inference service did not return job_id or outputs.shapefile")
             
-            QgsMessageLog.logMessage(
-                f"Inference job started successfully. Job ID: {job_id}",
-                "VEC Plugin",
-                Qgis.Info
-            )
+            if job_id:
+                QgsMessageLog.logMessage(
+                    f"Inference job started successfully. Job ID: {job_id}",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
+            else:
+                QgsMessageLog.logMessage(
+                    "Inference response included direct outputs without a job ID.",
+                    "VEC Plugin",
+                    Qgis.Info
+                )
           
-            return job_id
+            return result
           
         except requests.exceptions.ConnectionError as e:
             error_msg = self._sanitize_urls(str(e))
@@ -1180,10 +1269,11 @@ class VecInferenceClient:
                 raise Exception(f"File not found (404). File ID {file_id} may not exist or may not be ready yet.")
             elif status_code == 429:
                 raise Exception("Rate limit exceeded (429). Please wait a moment and try again.")
-            elif status_code >= 500:
+            elif status_code is not None and status_code >= 500:
                 raise Exception(f"Server error ({status_code}). The inference service encountered an internal error. Please try again later.")
             else:
-                raise Exception(f"Inference request failed with HTTP {status_code}: {sanitized_error}")
+                status_label = status_code if status_code is not None else "unknown"
+                raise Exception(f"Inference request failed with HTTP {status_label}: {sanitized_error}")
         
         except requests.exceptions.RequestException as e:
             error_msg = self._sanitize_urls(str(e))
@@ -1385,7 +1475,7 @@ class VecInferenceClient:
         """
         download_endpoint = f"{self.service_url}/download/shapefile/{file_id}"
       
-        max_retries = 120  # Allow up to 120 retries for very large files (20-60 minutes)
+        max_retries = 5  # Keep retries short to avoid long wait loops
         base_delay = 10  # Start with 10 seconds between retries
         max_delay = 60  # Cap delay at 60 seconds
         
@@ -1477,3 +1567,163 @@ class VecInferenceClient:
         
         # Should never reach here, but just in case
         raise Exception(f"Download failed after {max_retries} attempts")
+
+    def _resolve_shapefile_target(self, base_url, output_files):
+        """
+        Resolve shapefile download target from output_files.
+
+        Priority:
+        1) shapefile (HTTP/S)
+        2) shapefile_download_url (relative or absolute)
+        3) shapefile_signed_url (HTTP/S)
+        4) shapefile_gcs or gs:// value (requires authenticated GCS client path)
+        """
+        s = output_files or {}
+        shapefile = s.get("shapefile")
+        if isinstance(shapefile, str) and shapefile.startswith(("http://", "https://")):
+            return ("http", shapefile)
+
+        download_url = s.get("shapefile_download_url")
+        if isinstance(download_url, str) and download_url:
+            if download_url.startswith(("http://", "https://")):
+                return ("http", download_url)
+            return ("http", urljoin(base_url.rstrip("/") + "/", download_url.lstrip("/")))
+
+        signed_url = s.get("shapefile_signed_url")
+        if isinstance(signed_url, str) and signed_url.startswith(("http://", "https://")):
+            return ("http", signed_url)
+
+        gcs = s.get("shapefile_gcs") or shapefile
+        if isinstance(gcs, str) and gcs.startswith("gs://"):
+            return ("gcs", gcs)
+        return None
+
+    def _resolve_summary_csv_target(self, base_url, output_files):
+        """
+        Resolve summary CSV download target from output_files.
+
+        Priority:
+        1) summary_csv (HTTP/S)
+        2) summary_csv_download_url (relative or absolute)
+        3) summary_csv_signed_url (HTTP/S)
+        4) summary_csv_gcs or gs:// value (requires authenticated GCS client path)
+        """
+        s = output_files or {}
+        csv = s.get("summary_csv")
+        if isinstance(csv, str) and csv.startswith(("http://", "https://")):
+            return ("http", csv)
+
+        download_url = s.get("summary_csv_download_url")
+        if isinstance(download_url, str) and download_url:
+            if download_url.startswith(("http://", "https://")):
+                return ("http", download_url)
+            return ("http", urljoin(base_url.rstrip("/") + "/", download_url.lstrip("/")))
+
+        signed_url = s.get("summary_csv_signed_url")
+        if isinstance(signed_url, str) and signed_url.startswith(("http://", "https://")):
+            return ("http", signed_url)
+
+        gcs = s.get("summary_csv_gcs") or csv
+        if isinstance(gcs, str) and gcs.startswith("gs://"):
+            return ("gcs", gcs)
+        return None
+
+    def _download_shapefile_from_url(self, shapefile_target):
+        """
+        Download shapefile ZIP from resolved target and extract .shp.
+
+        :param shapefile_target: ("http", url) or ("gcs", gs://...)
+        :type shapefile_target: tuple
+        :returns: Path to extracted .shp file
+        :rtype: str
+        """
+        try:
+            if not isinstance(shapefile_target, tuple) or len(shapefile_target) != 2:
+                raise Exception("Invalid shapefile download target.")
+            kind, target = shapefile_target
+            if kind == "gcs":
+                raise Exception(
+                    "Shapefile result returned only gs:// path. "
+                    "Please provide output_files.shapefile_download_url or signed URL."
+                )
+            shapefile_url = target
+            headers = self._get_auth_headers()
+            response = requests.get(shapefile_url, headers=headers, timeout=300, stream=True)
+            if response.status_code is not None and response.status_code >= 400:
+                body = ""
+                try:
+                    body = response.text[:300]
+                except Exception:
+                    pass
+                raise Exception(
+                    f"HTTP {response.status_code} for shapefile URL {self._sanitize_urls(shapefile_url)}. "
+                    f"Body: {self._sanitize_urls(body)}"
+                )
+            response.raise_for_status()
+
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, 'result.zip')
+
+            with open(zip_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+
+            shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
+            if not shp_files:
+                raise Exception("No shapefile (.shp) found in downloaded ZIP")
+            return os.path.join(temp_dir, shp_files[0])
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to download shapefile from outputs URL: {self._sanitize_urls(str(e))}")
+        except Exception as e:
+            raise Exception(f"Failed to extract shapefile from outputs URL: {self._sanitize_urls(str(e))}")
+
+    def _download_summary_csv_from_url(self, summary_csv_target):
+        """
+        Download panels summary CSV from resolved target.
+
+        :param summary_csv_target: ("http", url) or ("gcs", gs://...)
+        :type summary_csv_target: tuple
+        :returns: Local path to downloaded CSV
+        :rtype: str
+        """
+        try:
+            if not isinstance(summary_csv_target, tuple) or len(summary_csv_target) != 2:
+                raise Exception("Invalid summary CSV download target.")
+            kind, target = summary_csv_target
+            if kind == "gcs":
+                raise Exception(
+                    "Summary CSV result returned only gs:// path. "
+                    "Please provide output_files.summary_csv_download_url or signed URL."
+                )
+            summary_csv_url = target
+            headers = self._get_auth_headers()
+            response = requests.get(summary_csv_url, headers=headers, timeout=120, stream=True)
+            if response.status_code is not None and response.status_code >= 400:
+                body = ""
+                try:
+                    body = response.text[:300]
+                except Exception:
+                    pass
+                raise Exception(
+                    f"HTTP {response.status_code} for summary CSV URL {self._sanitize_urls(summary_csv_url)}. "
+                    f"Body: {self._sanitize_urls(body)}"
+                )
+            response.raise_for_status()
+
+            temp_dir = tempfile.mkdtemp()
+            csv_path = os.path.join(temp_dir, 'panels_summary.csv')
+
+            with open(csv_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+                raise Exception("Downloaded CSV is missing or empty")
+            return csv_path
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to download panels summary CSV: {self._sanitize_urls(str(e))}")
+        except Exception as e:
+            raise Exception(f"Failed to prepare panels summary CSV: {self._sanitize_urls(str(e))}")
