@@ -30,6 +30,7 @@ from qgis.PyQt.QtGui import QDesktopServices
 from qgis.core import QgsProject, QgsGeometry, QgsWkbTypes, QgsPointXY
 from qgis.gui import QgsMapToolCapture, QgsRubberBand
 from .order_imagery_dialog import OrderImageryDialog
+from .api_config import INFERENCE_BASE_URL
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -248,9 +249,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # Call validation endpoint
         try:
             from .vec_inference_client import VecInferenceClient
-            # Use hardcoded service URL for auth endpoint
-            INFERENCE_SERVICE_URL = "https://inference-service-proxy-xt7fd24wta-uc.a.run.app"
-            temp_client = VecInferenceClient(INFERENCE_SERVICE_URL)
+            temp_client = VecInferenceClient(INFERENCE_BASE_URL)
             token, expiry = temp_client.validate_license_key(license_key)
             
             if token:

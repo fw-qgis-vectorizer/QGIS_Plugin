@@ -34,6 +34,7 @@ from .resources import *
 from .vec_plugin_dialog import VecPluginDialog
 from .order_imagery_dialog import OrderImageryDialog
 from .vec_inference_client import VecInferenceClient
+from .api_config import INFERENCE_BASE_URL, UPLOAD_BASE_URL
 import os.path
 import tempfile
 
@@ -281,6 +282,7 @@ class VecPlugin:
             output_name = self.dlg.get_output_layer_name()
             crop_geometry = self.dlg.get_crop_geometry()
             jwt_token = self.dlg.get_jwt_token()
+            license_key = self.dlg.get_license_key()
             detection_type = self.dlg.get_detection_type()
             
             # Validate license is validated
@@ -334,13 +336,14 @@ class VecPlugin:
                 self._is_processing = False
                 return
 
-            # Hardcoded service URLs
-            INFERENCE_SERVICE_URL = "https://inference.usefieldwatch.com/"
-            UPLOAD_SERVICE_URL = "https://upload.usefieldwatch.com/"
-            
             # Initialize inference client with hardcoded URLs and JWT token
             try:
-                client = VecInferenceClient(INFERENCE_SERVICE_URL, upload_url=UPLOAD_SERVICE_URL, jwt_token=jwt_token)
+                client = VecInferenceClient(
+                    INFERENCE_BASE_URL,
+                    upload_url=UPLOAD_BASE_URL,
+                    jwt_token=jwt_token,
+                    license_key=license_key
+                )
             except Exception as e:
                 self.iface.messageBar().pushMessage(
                     "Error",

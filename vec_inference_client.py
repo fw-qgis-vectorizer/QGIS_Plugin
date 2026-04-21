@@ -35,6 +35,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QVariant
 from .gdal_bootstrap import ensure_gdal_environment
+from .api_config import ApiRoutes
 
 
 # Setup logging for raster cropping operations
@@ -84,7 +85,7 @@ class VecInferenceClient:
       
         return text_str
   
-    def __init__(self, service_url, upload_url=None, jwt_token=None):
+    def __init__(self, service_url, upload_url=None, jwt_token=None, license_key=None):
         """
         Initialize the inference client.
       
@@ -99,6 +100,7 @@ class VecInferenceClient:
         # If upload_url not provided, assume upload service is at same base URL
         self.upload_url = (upload_url.rstrip('/') if upload_url else service_url.rstrip('/'))
         self.jwt_token = jwt_token
+        self.license_key = license_key
   
     def validate_license_key(self, license_key):
         """
@@ -109,7 +111,7 @@ class VecInferenceClient:
         :returns: Tuple of (jwt_token, expiry_timestamp) or (None, None) if invalid
         :rtype: tuple
         """
-        auth_endpoint = f"{self.service_url}/auth/validate"
+        auth_endpoint = ApiRoutes.auth_validate(self.service_url)
       
         try:
             response = requests.post(
@@ -145,6 +147,23 @@ class VecInferenceClient:
         if self.jwt_token:
             headers['Authorization'] = f'Bearer {self.jwt_token}'
         return headers
+
+    def _try_revalidate_token(self):
+        """
+        Attempt to refresh JWT token using stored license key.
+        Returns True if token was refreshed.
+        """
+        if not self.license_key:
+            return False
+        token, _expiry = self.validate_license_key(self.license_key)
+        if token:
+            QgsMessageLog.logMessage(
+                "JWT token refreshed via /auth/validate after 401.",
+                "VEC Plugin",
+                Qgis.Info
+            )
+            return True
+        return False
   
     def process_raster_layer(
         self,
@@ -286,40 +305,34 @@ class VecInferenceClient:
                 if not isinstance(inference_result, dict):
                     raise Exception("Inference service returned an invalid response payload")
 
-                outputs = inference_result.get('outputs') or {}
-                shapefile_target = None
-                summary_csv_target = None
                 job_id = (
                     inference_result.get('job_id')
                     or inference_result.get('jobId')
                     or inference_result.get('jobID')
                 )
-                if not job_id and not outputs:
-                    raise Exception("Failed to start inference job")
+                if not job_id:
+                    raise Exception("Inference did not return job_id for QGIS flow.")
 
-                # /roofnel flow:
-                # POST /roofnel/{file_id} -> get job_id
-                # GET /status/{job_id} until completed
-                # Use completed status payload result key for shapefile path
-                if detection_type == "solar_panel":
-                    if not job_id:
-                        raise Exception("Solar panel inference did not return job_id.")
-                    if progress_callback:
-                        progress_callback(35, "Waiting for panel inference to complete...")
-                    status_data = self._poll_status(job_id, progress_callback=progress_callback)
-                    results = status_data.get('results') or {}
-                    output_files = results.get('output_files') or {}
-                    shapefile_target = self._resolve_shapefile_target(self.service_url, output_files)
-                    summary_csv_target = self._resolve_summary_csv_target(self.service_url, output_files)
-                    if not shapefile_target:
-                        raise Exception(
-                            "Completed status payload did not include a valid panel shapefile "
-                            "download target in results.output_files."
-                        )
-                else:
-                    # For /infer, if outputs are included directly, use the same resolver logic.
-                    shapefile_target = self._resolve_shapefile_target(self.service_url, outputs)
-                    summary_csv_target = self._resolve_summary_csv_target(self.service_url, outputs)
+                if progress_callback:
+                    progress_callback(35, "Waiting for inference job status...")
+
+                # Poll new QGIS status route until completion.
+                status_data = self._poll_status(job_id, progress_callback=progress_callback)
+                results = status_data.get('results') or {}
+                output_files = results.get('output_files') or {}
+
+                # Resolve download targets from status payload using preferred key order.
+                shapefile_target = self._resolve_shapefile_target(self.service_url, output_files)
+                summary_csv_target = self._resolve_summary_csv_target(self.service_url, output_files)
+                json_target = self._resolve_json_target(self.service_url, output_files)
+
+                # Deterministic QGIS fallback route by job_id when key is absent or only gs:// is provided.
+                if (not shapefile_target) or (
+                    isinstance(shapefile_target, tuple) and len(shapefile_target) == 2 and shapefile_target[0] == "gcs"
+                ):
+                    shapefile_target = ("http", ApiRoutes.qgis_download_shapefile(self.service_url, job_id))
+                if not json_target:
+                    json_target = ("http", ApiRoutes.qgis_download_json(self.service_url, job_id))
               
                 # Step 3: Download shapefile (using file_id from upload)
                 if progress_callback:
@@ -331,10 +344,18 @@ class VecInferenceClient:
                     Qgis.Info
                 )
               
-                if shapefile_target:
-                    shapefile_path = self._download_shapefile_from_url(shapefile_target)
-                else:
-                    shapefile_path = self._download_shapefile(file_id)
+                shapefile_path = self._download_shapefile_from_url(shapefile_target, job_id=job_id)
+
+                # QGIS JSON download for completed jobs (best-effort, not required for layer load)
+                json_path = None
+                try:
+                    json_path = self._download_json_from_url(json_target)
+                except Exception as json_err:
+                    QgsMessageLog.logMessage(
+                        f"QGIS JSON download skipped: {self._sanitize_urls(str(json_err))}",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
 
                 summary_csv_path = None
                 if summary_csv_target:
@@ -343,8 +364,8 @@ class VecInferenceClient:
                         if isinstance(summary_csv_target, tuple) and len(summary_csv_target) == 2:
                             target_kind, _target_value = summary_csv_target
                             if target_kind == "gcs":
-                                # Backend guidance: use API CSV download path instead of raw gs://.
-                                summary_csv_target = ("http", f"{self.service_url}/download/csv/{file_id}")
+                                # Backend guidance: use CSV download path by job_id instead of raw gs://.
+                                summary_csv_target = ("http", ApiRoutes.csv_download(self.service_url, job_id))
                         summary_csv_path = self._download_summary_csv_from_url(summary_csv_target)
                     except Exception as csv_err:
                         QgsMessageLog.logMessage(
@@ -365,7 +386,8 @@ class VecInferenceClient:
               
                 return {
                     "shapefile_path": shapefile_path,
-                    "summary_csv_path": summary_csv_path
+                    "summary_csv_path": summary_csv_path,
+                    "json_path": json_path
                 }
               
             finally:
@@ -859,7 +881,7 @@ class VecInferenceClient:
         )
       
         try:
-            upload_endpoint = f"{self.upload_url}/upload"
+            upload_endpoint = ApiRoutes.upload(self.upload_url)
             file_name = os.path.basename(image_path)
             content_type = "image/tiff"  # More accurate than application/octet-stream
             
@@ -1102,7 +1124,8 @@ class VecInferenceClient:
         iou_threshold=0.15,
         remove_overlaps=True,
         overlap_method="clip",
-        detection_type="building"
+        detection_type="building",
+        _retried=False
     ):
         """
         Start inference job using building or solar panel endpoint.
@@ -1123,7 +1146,7 @@ class VecInferenceClient:
         if detection_type == "solar_panel":
             # /roofnel is panel-only; backend uses a fixed prompt internally.
             params = None
-            inference_endpoint = f"{self.service_url}/roofnel/{file_id}"
+            inference_endpoint = ApiRoutes.qgis_panel(self.service_url, file_id)
         else:
             params = {
                 'prompt': prompt,
@@ -1133,10 +1156,15 @@ class VecInferenceClient:
                 'remove_overlaps': remove_overlaps,
                 'overlap_method': overlap_method
             }
-            inference_endpoint = f"{self.service_url}/infer/qgis/{file_id}"
+            inference_endpoint = ApiRoutes.qgis_infer(self.service_url, file_id)
         
         try:
             headers = self._get_auth_headers()
+            QgsMessageLog.logMessage(
+                f"Calling inference URL (file_id): {self._sanitize_urls(inference_endpoint)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
             
             try:
                 response = requests.post(
@@ -1262,11 +1290,26 @@ class VecInferenceClient:
             )
             
             if status_code == 401:
+                if not _retried and self._try_revalidate_token():
+                    return self._start_inference(
+                        file_id,
+                        prompt=prompt,
+                        confidence=confidence,
+                        alpha=alpha,
+                        iou_threshold=iou_threshold,
+                        remove_overlaps=remove_overlaps,
+                        overlap_method=overlap_method,
+                        detection_type=detection_type,
+                        _retried=True
+                    )
                 raise Exception("Authentication failed (401). JWT token may be invalid or expired. Please re-validate your license key.")
             elif status_code == 403:
                 raise Exception("Access forbidden (403). Your license may not have permission for this operation.")
             elif status_code == 404:
-                raise Exception(f"File not found (404). File ID {file_id} may not exist or may not be ready yet.")
+                raise Exception(
+                    f"Migration routing error (404) for QGIS inference URL: {self._sanitize_urls(inference_endpoint)} "
+                    f"using file_id={file_id}."
+                )
             elif status_code == 429:
                 raise Exception("Rate limit exceeded (429). Please wait a moment and try again.")
             elif status_code is not None and status_code >= 500:
@@ -1293,7 +1336,7 @@ class VecInferenceClient:
             )
             raise Exception(f"Inference error: {error_msg}")
   
-    def _poll_status(self, job_id, progress_callback=None, poll_interval=5, max_wait_time=3600):
+    def _poll_status(self, job_id, progress_callback=None, poll_interval=5, max_wait_time=3600, _retried=False):
         """
         Poll status endpoint until job is complete.
       
@@ -1306,7 +1349,12 @@ class VecInferenceClient:
         :returns: Final status response
         :rtype: dict
         """
-        status_endpoint = f"{self.service_url}/status/{job_id}"
+        status_endpoint = ApiRoutes.qgis_status(self.service_url, job_id)
+        QgsMessageLog.logMessage(
+            f"Polling status URL (job_id): {self._sanitize_urls(status_endpoint)}",
+            "VEC Plugin",
+            Qgis.Info
+        )
         start_time = time.time()
       
         poll_count = 0
@@ -1389,9 +1437,20 @@ class VecInferenceClient:
                 # Non-retryable errors (auth, not found, forbidden)
                 if status_code in (401, 403, 404):
                     if status_code == 401:
-                        raise Exception(f"Authentication failed (401). JWT token may be invalid or expired.")
+                        if not _retried and self._try_revalidate_token():
+                            return self._poll_status(
+                                job_id,
+                                progress_callback=progress_callback,
+                                poll_interval=poll_interval,
+                                max_wait_time=max_wait_time,
+                                _retried=True
+                            )
+                        raise Exception("Authentication failed (401). JWT token may be invalid or expired.")
                     elif status_code == 404:
-                        raise Exception(f"Job not found (404). Job ID: {job_id}.")
+                        raise Exception(
+                            f"Migration routing error (404) for QGIS status URL: "
+                            f"{self._sanitize_urls(status_endpoint)} using job_id={job_id}."
+                        )
                     elif status_code == 403:
                         raise Exception(f"Access forbidden (403). License may be invalid.")
               
@@ -1463,17 +1522,22 @@ class VecInferenceClient:
                 )
                 raise Exception(f"Status polling error: {self._sanitize_urls(str(e))}") from e
   
-    def _download_shapefile(self, file_id):
+    def _download_shapefile(self, job_id):
         """
-        Download shapefile from /download/shapefile/{file_id} endpoint.
+        Download shapefile from /qgis/download/shapefile/{job_id} endpoint.
         Waits for inference to complete by retrying until file is ready.
       
-        :param file_id: File ID from upload service (used for GCS path)
-        :type file_id: str
+        :param job_id: Job ID from inference service
+        :type job_id: str
         :returns: Path to downloaded shapefile
         :rtype: str
         """
-        download_endpoint = f"{self.service_url}/download/shapefile/{file_id}"
+        download_endpoint = ApiRoutes.qgis_download_shapefile(self.service_url, job_id)
+        QgsMessageLog.logMessage(
+            f"Downloading shapefile URL (job_id): {self._sanitize_urls(download_endpoint)}",
+            "VEC Plugin",
+            Qgis.Info
+        )
       
         max_retries = 5  # Keep retries short to avoid long wait loops
         base_delay = 10  # Start with 10 seconds between retries
@@ -1573,16 +1637,12 @@ class VecInferenceClient:
         Resolve shapefile download target from output_files.
 
         Priority:
-        1) shapefile (HTTP/S)
-        2) shapefile_download_url (relative or absolute)
-        3) shapefile_signed_url (HTTP/S)
+        1) shapefile_download_url (relative or absolute)
+        2) shapefile_signed_url (HTTP/S)
+        3) shapefile (if gs:// then backend route fallback should be used by caller)
         4) shapefile_gcs or gs:// value (requires authenticated GCS client path)
         """
         s = output_files or {}
-        shapefile = s.get("shapefile")
-        if isinstance(shapefile, str) and shapefile.startswith(("http://", "https://")):
-            return ("http", shapefile)
-
         download_url = s.get("shapefile_download_url")
         if isinstance(download_url, str) and download_url:
             if download_url.startswith(("http://", "https://")):
@@ -1592,6 +1652,10 @@ class VecInferenceClient:
         signed_url = s.get("shapefile_signed_url")
         if isinstance(signed_url, str) and signed_url.startswith(("http://", "https://")):
             return ("http", signed_url)
+
+        shapefile = s.get("shapefile")
+        if isinstance(shapefile, str) and shapefile.startswith(("http://", "https://")):
+            return ("http", shapefile)
 
         gcs = s.get("shapefile_gcs") or shapefile
         if isinstance(gcs, str) and gcs.startswith("gs://"):
@@ -1628,7 +1692,31 @@ class VecInferenceClient:
             return ("gcs", gcs)
         return None
 
-    def _download_shapefile_from_url(self, shapefile_target):
+    def _resolve_json_target(self, base_url, output_files):
+        """
+        Resolve JSON download target from output_files.
+        """
+        s = output_files or {}
+        js = s.get("json")
+        if isinstance(js, str) and js.startswith(("http://", "https://")):
+            return ("http", js)
+
+        download_url = s.get("json_download_url")
+        if isinstance(download_url, str) and download_url:
+            if download_url.startswith(("http://", "https://")):
+                return ("http", download_url)
+            return ("http", urljoin(base_url.rstrip("/") + "/", download_url.lstrip("/")))
+
+        signed_url = s.get("json_signed_url")
+        if isinstance(signed_url, str) and signed_url.startswith(("http://", "https://")):
+            return ("http", signed_url)
+
+        gcs = s.get("json_gcs") or js
+        if isinstance(gcs, str) and gcs.startswith("gs://"):
+            return ("gcs", gcs)
+        return None
+
+    def _download_shapefile_from_url(self, shapefile_target, job_id=None, _retried=False):
         """
         Download shapefile ZIP from resolved target and extract .shp.
 
@@ -1642,13 +1730,44 @@ class VecInferenceClient:
                 raise Exception("Invalid shapefile download target.")
             kind, target = shapefile_target
             if kind == "gcs":
-                raise Exception(
-                    "Shapefile result returned only gs:// path. "
-                    "Please provide output_files.shapefile_download_url or signed URL."
-                )
+                if job_id:
+                    fallback_url = ApiRoutes.qgis_download_shapefile(self.service_url, job_id)
+                    QgsMessageLog.logMessage(
+                        "Shapefile target is gs://; auto-falling back to /qgis/download/shapefile/{job_id}.",
+                        "VEC Plugin",
+                        Qgis.Warning
+                    )
+                    kind = "http"
+                    target = fallback_url
+                else:
+                    raise Exception(
+                        "Shapefile result returned only gs:// path and job_id was unavailable. "
+                        "Please provide output_files.shapefile_download_url or signed URL."
+                    )
             shapefile_url = target
+            QgsMessageLog.logMessage(
+                f"Downloading shapefile URL: {self._sanitize_urls(shapefile_url)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
             headers = self._get_auth_headers()
             response = requests.get(shapefile_url, headers=headers, timeout=300, stream=True)
+            if response.status_code == 401 and not _retried and self._try_revalidate_token():
+                return self._download_shapefile_from_url(shapefile_target, job_id=job_id, _retried=True)
+            if (
+                response.status_code == 404
+                and job_id
+                and "/qgis/download/shapefile/" in shapefile_url
+            ):
+                legacy_url = f"{self.service_url.rstrip('/')}/download/shapefile/{job_id}"
+                QgsMessageLog.logMessage(
+                    f"QGIS shapefile route returned 404, trying legacy route: {self._sanitize_urls(legacy_url)}",
+                    "VEC Plugin",
+                    Qgis.Warning
+                )
+                response = requests.get(legacy_url, headers=headers, timeout=300, stream=True)
+                if response.status_code == 401 and not _retried and self._try_revalidate_token():
+                    return self._download_shapefile_from_url(("http", legacy_url), job_id=job_id, _retried=True)
             if response.status_code is not None and response.status_code >= 400:
                 body = ""
                 try:
@@ -1680,7 +1799,7 @@ class VecInferenceClient:
         except Exception as e:
             raise Exception(f"Failed to extract shapefile from outputs URL: {self._sanitize_urls(str(e))}")
 
-    def _download_summary_csv_from_url(self, summary_csv_target):
+    def _download_summary_csv_from_url(self, summary_csv_target, _retried=False):
         """
         Download panels summary CSV from resolved target.
 
@@ -1699,8 +1818,15 @@ class VecInferenceClient:
                     "Please provide output_files.summary_csv_download_url or signed URL."
                 )
             summary_csv_url = target
+            QgsMessageLog.logMessage(
+                f"Downloading summary CSV URL: {self._sanitize_urls(summary_csv_url)}",
+                "VEC Plugin",
+                Qgis.Info
+            )
             headers = self._get_auth_headers()
             response = requests.get(summary_csv_url, headers=headers, timeout=120, stream=True)
+            if response.status_code == 401 and not _retried and self._try_revalidate_token():
+                return self._download_summary_csv_from_url(summary_csv_target, _retried=True)
             if response.status_code is not None and response.status_code >= 400:
                 body = ""
                 try:
@@ -1727,3 +1853,46 @@ class VecInferenceClient:
             raise Exception(f"Failed to download panels summary CSV: {self._sanitize_urls(str(e))}")
         except Exception as e:
             raise Exception(f"Failed to prepare panels summary CSV: {self._sanitize_urls(str(e))}")
+
+    def _download_json_from_url(self, json_target, _retried=False):
+        """
+        Download JSON from resolved target.
+        """
+        if not isinstance(json_target, tuple) or len(json_target) != 2:
+            raise Exception("Invalid JSON download target.")
+        kind, target = json_target
+        if kind == "gcs":
+            raise Exception(
+                "JSON result returned only gs:// path. "
+                "Please provide output_files.json_download_url or signed URL."
+            )
+        json_url = target
+        QgsMessageLog.logMessage(
+            f"Downloading JSON URL (job_id): {self._sanitize_urls(json_url)}",
+            "VEC Plugin",
+            Qgis.Info
+        )
+        headers = self._get_auth_headers()
+        response = requests.get(json_url, headers=headers, timeout=120, stream=True)
+        if response.status_code == 401 and not _retried and self._try_revalidate_token():
+            return self._download_json_from_url(json_target, _retried=True)
+        if response.status_code is not None and response.status_code >= 400:
+            body = ""
+            try:
+                body = response.text[:300]
+            except Exception:
+                pass
+            raise Exception(
+                f"HTTP {response.status_code} for JSON URL {self._sanitize_urls(json_url)}. "
+                f"Body: {self._sanitize_urls(body)}"
+            )
+        response.raise_for_status()
+
+        temp_dir = tempfile.mkdtemp()
+        json_path = os.path.join(temp_dir, 'result.json')
+        with open(json_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        if not os.path.exists(json_path) or os.path.getsize(json_path) == 0:
+            raise Exception("Downloaded JSON is missing or empty")
+        return json_path
