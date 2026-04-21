@@ -7,7 +7,7 @@
 name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
 description=Vectorization inference service for building detection
-version=2.2.0
+version=2.3.0
 author=FieldWatch
 email=support@usefieldwatch.com
 
