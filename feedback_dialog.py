@@ -22,10 +22,9 @@ class FeedbackDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            self.tr(
-                "Your message is sent to FieldWatch (max {0} characters). "
-                "Submission time is recorded on the server when you send — you cannot set the date."
-            ).format(feedback_helpers.FEEDBACK_MESSAGE_MAX_LEN)
+            self.tr("Your message is sent to FieldWatch (max {0} characters).").format(
+                feedback_helpers.FEEDBACK_MESSAGE_MAX_LEN
+            )
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
