@@ -103,7 +103,7 @@ class PolygonCaptureTool(QgsMapToolCapture):
 class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     # Signal emitted when polygon is drawn
     polygon_drawn = QtCore.pyqtSignal(QgsGeometry)
-    # Signal emitted when OK is clicked (but dialog stays open)
+    # Signal emitted when Run is clicked (but dialog stays open)
     processing_started = QtCore.pyqtSignal()
     
     def __init__(self, parent=None, iface=None):
@@ -179,17 +179,11 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # Connect signal
         self.polygon_drawn.connect(self.on_polygon_drawn)
 
-        # Add Refresh button to reset plugin state
-        self.refresh_button = QtWidgets.QPushButton("Refresh")
-        self.button_box.addButton(
-            self.refresh_button, QtWidgets.QDialogButtonBox.ResetRole
-        )
-        self.refresh_button.clicked.connect(self._refresh_plugin_state)
-        
-        # Disable OK button initially - polygon must be drawn first AND (paid JWT or active trial)
-        ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
-        if ok_button:
-            ok_button.setEnabled(False)
+        self.refreshButton.clicked.connect(self._refresh_plugin_state)
+
+        # Disable Run until polygon is drawn AND (paid JWT or active trial)
+        self.runButton.setEnabled(False)
+        self.runButton.setDefault(True)
 
         # Non-blocking trial state fetch after UI is ready
         QtCore.QTimer.singleShot(0, self.refresh_trial_state)
@@ -374,11 +368,10 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self._sync_ok_button_state()
 
     def _sync_ok_button_state(self):
-        ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
-        if not ok_button:
-            return
         auth_ok = bool(self.jwt_token) or self.trial_can_run()
-        ok_button.setEnabled(bool(self.crop_geometry and not self.crop_geometry.isEmpty() and auth_ok))
+        self.runButton.setEnabled(
+            bool(self.crop_geometry and not self.crop_geometry.isEmpty() and auth_ok)
+        )
 
     def apply_trial_usage_denied(self, data):
         """Update UI after usage denied."""
@@ -575,10 +568,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.clearPolygonButton.setEnabled(False)
         self.drawPolygonButton.setEnabled(True)
         
-        # Disable OK button when polygon is cleared
-        ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
-        if ok_button:
-            ok_button.setEnabled(False)
+        self.runButton.setEnabled(False)
     
     def accept(self):
         """Override accept to validate polygon is drawn and auth (paid or trial), then emit signal instead of closing."""

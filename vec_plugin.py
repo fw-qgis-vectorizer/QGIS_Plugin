@@ -22,7 +22,7 @@
 """
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QDialogButtonBox, QDialog
+from qgis.PyQt.QtWidgets import QAction, QDialog
 from qgis.core import (
     QgsVectorLayer, QgsProject, QgsMessageLog,
     QgsDistanceArea, Qgis
@@ -422,13 +422,9 @@ class VecPlugin:
                     trial_server_id=trial_server_id,
                 )
 
-            # Disable OK/Cancel buttons during processing
-            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
-            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
-            if ok_button:
-                ok_button.setEnabled(False)
-            if cancel_button:
-                cancel_button.setEnabled(False)
+            # Disable Run/Cancel during processing
+            self.dlg.runButton.setEnabled(False)
+            self.dlg.cancelButton.setEnabled(False)
             
             # Show progress bar
             self.dlg.progressBar.setVisible(True)
@@ -473,12 +469,8 @@ class VecPlugin:
             self._is_processing = False
             
             # Re-enable buttons
-            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
-            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
-            if ok_button:
-                ok_button.setEnabled(True)
-            if cancel_button:
-                cancel_button.setEnabled(True)
+            self.dlg.runButton.setEnabled(True)
+            self.dlg.cancelButton.setEnabled(True)
             
             # Reconnect processing signal
             try:
@@ -548,12 +540,8 @@ class VecPlugin:
             self.dlg.statusLabel.setText("Complete!")
             
             # Re-enable buttons
-            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
-            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
-            if ok_button:
-                ok_button.setEnabled(True)
-            if cancel_button:
-                cancel_button.setEnabled(True)
+            self.dlg.runButton.setEnabled(True)
+            self.dlg.cancelButton.setEnabled(True)
             
             # Reset processing flag
             self._is_processing = False
@@ -613,12 +601,8 @@ class VecPlugin:
             )
             
             # Re-enable buttons
-            ok_button = self.dlg.button_box.button(QDialogButtonBox.Ok)
-            cancel_button = self.dlg.button_box.button(QDialogButtonBox.Cancel)
-            if ok_button:
-                ok_button.setEnabled(True)
-            if cancel_button:
-                cancel_button.setEnabled(True)
+            self.dlg.runButton.setEnabled(True)
+            self.dlg.cancelButton.setEnabled(True)
             
             # Reconnect processing signal to allow retry
             try:

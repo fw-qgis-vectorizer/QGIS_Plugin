@@ -14,7 +14,7 @@ __copyright__ = 'Copyright 2025, FieldWatch'
 
 import unittest
 
-from qgis.PyQt.QtGui import QDialogButtonBox, QDialog
+from qgis.PyQt.QtWidgets import QDialog
 
 from vec_plugin_dialog import VecPluginDialog
 
@@ -33,17 +33,15 @@ class VecPluginDialogTest(unittest.TestCase):
         """Runs after each test."""
         self.dialog = None
 
-    def test_dialog_ok(self):
-        """Test we can click OK."""
-
-        button = self.dialog.button_box.button(QDialogButtonBox.Ok)
-        button.click()
-        result = self.dialog.result()
-        self.assertEqual(result, QDialog.Accepted)
+    def test_dialog_run(self):
+        """Run uses overridden accept(); without license/polygon the dialog does not close as Accepted."""
+        self.assertEqual(self.dialog.runButton.text(), "Run")
+        self.dialog.runButton.click()
+        self.assertEqual(self.dialog.result(), QDialog.Rejected)
 
     def test_dialog_cancel(self):
         """Test we can click cancel."""
-        button = self.dialog.button_box.button(QDialogButtonBox.Cancel)
+        button = self.dialog.cancelButton
         button.click()
         result = self.dialog.result()
         self.assertEqual(result, QDialog.Rejected)
