@@ -35,9 +35,8 @@ from .order_imagery_dialog import OrderImageryDialog
 from .feedback_dialog import FeedbackDialog
 from .api_config import INFERENCE_BASE_URL
 
-# Browser destinations for licence keys (adjust trial URL when marketing finalizes path).
+# Browser destination for paid licence keys.
 FIELDWATCH_HOME_URL = "https://usefieldwatch.com/"
-FIELDWATCH_TRIAL_LICENCE_URL = "https://usefieldwatch.com/trial"
 from . import trial_helpers
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -162,10 +161,10 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # Connect license validation button
         self.validateLicenseButton.clicked.connect(self.validate_license)
         
-        # Connect Get License Key buttons (trial = left, full license = right)
-        if hasattr(self, "getTrialLicenseKeyButton"):
-            self.getTrialLicenseKeyButton.clicked.connect(self.open_trial_licence_key_website)
-        self.getLicenseKeyButton.clicked.connect(self.open_fieldwatch_website)
+        # One morphing button: Generate Trial Key (refresh/bootstrap) until trial is exhausted,
+        # then Get Licence (opens FieldWatch). Paid JWT always shows Get Licence.
+        self.getLicenseKeyButton.clicked.connect(self._on_license_action_clicked)
+        self._update_license_action_button()
 
         if hasattr(self, "howToUsePluginButton"):
             self.howToUsePluginButton.clicked.connect(self.open_how_to_use_plugin_video)
@@ -262,34 +261,71 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             and self.trial_uses_remaining > 0
         )
 
+    def _license_action_is_generate_trial(self):
+        """True when the single licence button should refresh/bootstrap trial (not open the shop)."""
+        if self.jwt_token:
+            return False
+        if self.trial_status == "exhausted":
+            return False
+        if self.trial_status == "revoked":
+            return False
+        rem = self.trial_uses_remaining
+        if rem is not None and rem <= 0:
+            return False
+        return True
+
+    def _update_license_action_button(self):
+        """Morph label: Generate Trial Key while trial has runs; Get Licence once exhausted or paid."""
+        if not hasattr(self, "getLicenseKeyButton"):
+            return
+        if self._license_action_is_generate_trial():
+            self.getLicenseKeyButton.setText(self.tr("Generate Trial Key"))
+            self.getLicenseKeyButton.setToolTip(
+                self.tr(
+                    "Contact the server to activate or refresh your free trial runs. "
+                    "When your trial is used up, this becomes a link to get a paid licence."
+                )
+            )
+        else:
+            self.getLicenseKeyButton.setText(self.tr("Get Licence"))
+            self.getLicenseKeyButton.setToolTip(
+                self.tr("Open FieldWatch in your browser to get a paid licence key.")
+            )
+
+    def _on_license_action_clicked(self):
+        if self._license_action_is_generate_trial():
+            self.refresh_trial_state(show_error_dialog=True)
+        else:
+            self.open_fieldwatch_website()
+
     def _update_trial_quota_label(self):
         if self.jwt_token:
             self.trialQuotaLabel.setText(
                 self.tr("Using paid license — runs use your key, not trial quota.")
             )
             self.trialQuotaLabel.setStyleSheet("color: gray;")
-            return
-        if self.trial_status is None and self.trial_uses_remaining is None:
+        elif self.trial_status is None and self.trial_uses_remaining is None:
             self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
             self.trialQuotaLabel.setStyleSheet("color: blue;")
-            return
-        total = self.trial_uses_total
-        rem = self.trial_uses_remaining
-        if total is not None and rem is not None:
-            used = max(0, total - rem)
-            txt = self.tr("{0} of {1} trial runs remaining (used {2}).").format(rem, total, used)
-        elif rem is not None:
-            txt = self.tr("{0} trial runs remaining.").format(rem)
         else:
-            txt = self.tr("Trial status: {0}").format(self.trial_status or "unknown")
-        if self.trial_status == "exhausted" or (rem is not None and rem <= 0):
-            self.trialQuotaLabel.setStyleSheet("color: red;")
-            txt += " " + self.tr("Register for a full license key at usefieldwatch.com.")
-        elif self.trial_status == "revoked":
-            self.trialQuotaLabel.setStyleSheet("color: red;")
-        else:
-            self.trialQuotaLabel.setStyleSheet("color: green;")
-        self.trialQuotaLabel.setText(txt)
+            total = self.trial_uses_total
+            rem = self.trial_uses_remaining
+            if total is not None and rem is not None:
+                used = max(0, total - rem)
+                txt = self.tr("{0} of {1} trial runs remaining (used {2}).").format(rem, total, used)
+            elif rem is not None:
+                txt = self.tr("{0} trial runs remaining.").format(rem)
+            else:
+                txt = self.tr("Trial status: {0}").format(self.trial_status or "unknown")
+            if self.trial_status == "exhausted" or (rem is not None and rem <= 0):
+                self.trialQuotaLabel.setStyleSheet("color: red;")
+                txt += " " + self.tr("Register for a full license key at usefieldwatch.com.")
+            elif self.trial_status == "revoked":
+                self.trialQuotaLabel.setStyleSheet("color: red;")
+            else:
+                self.trialQuotaLabel.setStyleSheet("color: green;")
+            self.trialQuotaLabel.setText(txt)
+        self._update_license_action_button()
 
     def refresh_trial_state(self, show_error_dialog=False):
         """GET /qgis/trial/state — updates labels and persisted trial_id."""
@@ -326,6 +362,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.tr("Trial status"),
                     str(e)[:500],
                 )
+            self._update_license_action_button()
 
     def apply_trial_usage_response(self, data):
         """Update UI after POST /qgis/trial/usage (allowed path)."""
@@ -445,10 +482,6 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     def open_fieldwatch_website(self):
         """Open FieldWatch website for a full paid licence key (existing behaviour)."""
         QDesktopServices.openUrl(QUrl(FIELDWATCH_HOME_URL))
-
-    def open_trial_licence_key_website(self):
-        """Open FieldWatch page to obtain a trial licence key."""
-        QDesktopServices.openUrl(QUrl(FIELDWATCH_TRIAL_LICENCE_URL))
 
     def open_how_to_use_plugin_video(self):
         """Open the plugin walkthrough video (YouTube)."""

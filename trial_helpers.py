@@ -28,11 +28,54 @@ def _plugin_version():
     return "unknown"
 
 
+def _safe_qgis_version():
+    """
+    QGIS version string for server telemetry. Never raises.
+
+    Do not use QgsApplication.version — it does not exist in PyQGIS (AttributeError).
+    Prefer QgsApplication.qgisVersion() (static), then Qgis.QGIS_VERSION, then env.
+    """
+    # Static API (QGIS 3.x)
+    qgis_version_fn = getattr(QgsApplication, "qgisVersion", None)
+    if callable(qgis_version_fn):
+        try:
+            qv = qgis_version_fn() or ""
+            if isinstance(qv, str) and qv.strip():
+                return qv.strip()
+        except Exception:
+            pass
+    inst = getattr(QgsApplication, "instance", lambda: None)()
+    if inst is not None:
+        inst_fn = getattr(inst, "qgisVersion", None)
+        if callable(inst_fn):
+            try:
+                qv = inst_fn() or ""
+                if isinstance(qv, str) and qv.strip():
+                    return qv.strip()
+            except Exception:
+                pass
+    try:
+        qv = str(getattr(Qgis, "QGIS_VERSION", "") or "").strip()
+        if qv:
+            return qv
+    except Exception:
+        pass
+    for envk in ("QGIS_VERSION", "RELEASE_NAME"):
+        ev = (os.environ.get(envk) or "").strip()
+        if ev:
+            return ev
+    return "unknown"
+
+
 def client_telemetry():
-    return {
-        "plugin_version": _plugin_version(),
-        "qgis_version": QgsApplication.version() or "unknown",
-    }
+    """plugin_version + qgis_version for trial/feedback APIs. Must not break HTTP helpers."""
+    try:
+        return {
+            "plugin_version": _plugin_version(),
+            "qgis_version": _safe_qgis_version(),
+        }
+    except Exception:
+        return {"plugin_version": _plugin_version(), "qgis_version": "unknown"}
 
 
 def ensure_install_key():
