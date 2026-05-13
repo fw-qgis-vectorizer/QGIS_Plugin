@@ -288,7 +288,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _on_license_action_clicked(self):
         if self._license_action_is_generate_trial():
-            self.refresh_trial_state(show_error_dialog=True)
+            # User-visible result: silent refresh looks like a no-op when quota is unchanged.
+            self.refresh_trial_state(show_error_dialog=True, show_success_dialog=True)
         else:
             self.open_fieldwatch_website()
 
@@ -321,7 +322,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             self.trialQuotaLabel.setText(txt)
         self._update_license_action_button()
 
-    def refresh_trial_state(self, show_error_dialog=False):
+    def refresh_trial_state(self, show_error_dialog=False, show_success_dialog=False):
         """GET /qgis/trial/state — updates labels and persisted trial_id."""
         try:
             data = trial_helpers.fetch_trial_state(
@@ -339,6 +340,28 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             self.trial_status = data.get("trial_state")
             self._update_trial_quota_label()
             self._sync_ok_button_state()
+            if show_success_dialog:
+                tid_str = (tid or self._trial_id or "").strip()
+                if tid_str:
+                    QtWidgets.QApplication.clipboard().setText(tid_str)
+                    clip_note = self.tr(
+                        "Your server trial id has been copied to the clipboard "
+                        "(for support or your records).\n\n"
+                    )
+                else:
+                    clip_note = ""
+                rem = data.get("uses_remaining")
+                tot = data.get("uses_total")
+                rem_s = str(rem) if rem is not None else "?"
+                tot_s = str(tot) if tot is not None else "?"
+                QtWidgets.QMessageBox.information(
+                    self,
+                    self.tr("Trial key"),
+                    clip_note
+                    + self.tr("Trial status refreshed from the server.\n\nRuns remaining: {0} of {1}.").format(
+                        rem_s, tot_s
+                    ),
+                )
         except Exception as e:
             self.trial_status = None
             self.trialQuotaLabel.setText(
