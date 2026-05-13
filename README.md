@@ -1,181 +1,117 @@
-# VEC Plugin - QGIS Plugin for Building Detection
+# FieldWatch Vectorizer (QGIS plugin)
 
-A QGIS plugin that integrates with the VEC inference service for automated building detection from raster imagery using AI segmentation.
+QGIS plugin for **FieldWatch** vectorization: run AI segmentation on your raster imagery to produce building or solar-panel masks, integrated with the FieldWatch inference API.
 
 ## Features
 
-- **Polygon-based Area Selection**: Draw a polygon on the map to select the specific area for building detection
-- **Automated Processing Pipeline**: Uploads raster data, runs AI inference, and downloads results automatically
-- **Progress Tracking**: Real-time progress updates during processing
-- **Automatic Layer Loading**: Results are automatically loaded into QGIS as a vector layer
-- **Order Drone Imagery**: Request drone imagery (orthomosaic, DSM, or point cloud) for an area from within QGIS; set AOI on the map or by coordinates, choose resolution and deliverable, and submit your contact details
+- **Polygon-based area selection** — Draw a polygon on the map to define the crop area for inference.
+- **Building and solar-panel detection** — Choose **Detection type** (e.g. Building or Solar panel) before running.
+- **Paid license and trial** — Enter a **paid license key** and **Validate** for JWT-backed runs, or use the **trial** flow (install key, trial UUID, server-backed quota). The dialog shows **trial quota** and a single control to **Generate Trial Key** or open FieldWatch for a full licence, depending on state.
+- **Automated pipeline** — Crops/compresses the raster, uploads, runs inference, downloads results, and loads the vector layer (and optional summary table when the API returns one).
+- **Progress and status** — Progress bar and status text during processing.
+- **Run / Cancel / Refresh** — **Run** starts processing while keeping the dialog open; **Cancel** closes the dialog; **Refresh** resets crop/UI progress and refreshes trial state from the server.
+- **Order drone imagery** — Request orthomosaic, DSM, or point cloud for an AOI (drawn on a map or from coordinates), with resolution, estimate, and contact submission to FieldWatch.
+- **Help and feedback** — **How to use this plugin** opens the walkthrough video; **Send feedback** opens a short form that posts feedback to FieldWatch.
 
 ## Requirements
 
-- QGIS 3.x
-- Python 3.x (included with QGIS)
-- Internet connection (for API communication)
+- QGIS 3.x  
+- Python 3.x (bundled with QGIS)  
+- Internet access for API calls  
 
 ## Installation
 
-### Method 1: Manual Installation (Recommended)
+### Clone into the QGIS plugins folder (recommended)
 
-1. **Download the Plugin**
-   - Clone or download this repository:
-     ```bash
-     git clone https://github.com/fw-qgis-vectorizer/QGIS_Plugin.git
-     ```
-   - Or download as ZIP from GitHub and extract it
+The repository root **is** the plugin package (it contains `metadata.txt`, `__init__.py`, etc.). Clone it so the directory name under `python/plugins/` matches how you manage plugins (often `vec_plugin`):
 
-2. **Locate QGIS Plugin Directory**
-   - Open QGIS
-   - Go to **Settings → User Profiles → Open Active Profile Folder**
-   - Navigate to `python/plugins/` directory
-   - On Windows, this is typically:
-     ```
-     C:\Users\<YourUsername>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\
-     ```
+**Windows (Command Prompt or PowerShell)** — from your profile’s `python\plugins` folder (open it via **Settings → User Profiles → Open Active Profile Folder**, then enter `python\plugins`):
 
-3. **Copy Plugin Files**
-   - Copy the entire `vec_plugin` folder to the `python/plugins/` directory
-   - The folder structure should be:
-     ```
-     python/plugins/vec_plugin/
-       ├── __init__.py
-       ├── vec_plugin.py
-       ├── vec_plugin_dialog.py
-       ├── vec_plugin_dialog_base.ui
-       ├── vec_inference_client.py
-       ├── resources.py
-       ├── metadata.txt
-       └── ... (other files)
-     ```
+```bat
+cd %APPDATA%\QGIS\QGIS3\profiles\default\python\plugins
+git clone https://github.com/fw-qgis-vectorizer/QGIS_Plugin.git vec_plugin
+```
 
-4. **Enable the Plugin**
-   - In QGIS, go to **Plugins → Manage and Install Plugins**
-   - Click on **Installed** tab
-   - Search for "VEC Plugin" or "vec_plugin"
-   - Check the checkbox to enable it
-   - The plugin should now appear in your Plugins menu
+**macOS / Linux** — use the same path inside your active QGIS profile’s `python/plugins` directory, then:
 
-### Method 2: Using Plugin Manager (If Available)
+```bash
+git clone https://github.com/fw-qgis-vectorizer/QGIS_Plugin.git vec_plugin
+```
 
-If the plugin is published to the QGIS Plugin Repository:
+Then enable the plugin under **Plugins → Manage and Install Plugins → Installed** (search for **FieldWatch Vectorizer**).
 
-1. Open QGIS
-2. Go to **Plugins → Manage and Install Plugins**
-3. Search for "VEC Plugin"
-4. Click **Install Plugin**
-5. Enable it from the **Installed** tab
+### Or copy manually
+
+1. Open **Settings → User Profiles → Open Active Profile Folder** in QGIS.  
+2. Go to `python/plugins/`.  
+3. Place this plugin as a single folder (for example `vec_plugin/`) containing `__init__.py`, `metadata.txt`, `vec_plugin.py`, and the rest of the files from this repository.
+
+### Install from ZIP (QGIS)
+
+Zip the plugin folder so the archive contains one top-level folder (e.g. `vec_plugin/...`). In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**.
 
 ## Usage
 
-1. **Load a Raster Layer**
-   - Add a raster layer (GeoTIFF, JPEG, etc.) to your QGIS project
-   - Ensure the raster contains imagery suitable for building detection
+1. Add a suitable **raster layer** to the project.  
+2. Open **Plugins → FieldWatch Vectorizer → FieldWatch** (toolbar: same action).  
+3. **License** — Validate a paid key and/or use the trial controls as prompted; confirm trial quota if you are not on a paid JWT.  
+4. Choose the **input raster** and **detection type**.  
+5. Click **Draw Polygon**, finish with **right-click** (at least three vertices).  
+6. Set an **output layer name** if you want (default: `Building_Detections`).  
+7. Click **Run** — the dialog stays open while processing; when finished, layers are added and the map may zoom to results.  
+8. Use **Cancel** to close, or **Refresh** to reset the dialog and refresh trial state.
 
-2. **Open the Plugin**
-   - Go to **Plugins → VEC Plugin** (or use the toolbar icon if available)
-   - The plugin dialog will open
+## Order drone imagery
 
-3. **Select Input Layer**
-   - Choose your raster layer from the dropdown menu
+Use **Plugins → FieldWatch Vectorizer → Order drone imagery**.
 
-4. **Draw a Polygon**
-   - Click **"Draw Polygon"** button
-   - The dialog will hide and you can interact with the map
-   - Left-click on the map to add points to your polygon
-   - Right-click to finish the polygon (requires at least 3 points)
-   - The dialog will reappear showing the selected area
+### AOI
 
-5. **Set Output Name** (Optional)
-   - Enter a name for the output layer (default: "Building_Detections")
-
-6. **Run Processing**
-   - Click **OK** to start processing
-   - The plugin will:
-     - Crop the raster to your polygon area
-     - Compress and upload to the inference service
-     - Run AI building detection
-     - Download and load results into QGIS
-
-7. **View Results**
-   - The detected buildings will appear as a new vector layer
-   - The map will automatically zoom to the results
-   - Check the QGIS message bar for processing status
-
-## Order Drone Imagery
-
-You can request drone imagery for an area directly from the plugin. Go to **Plugins → FieldWatch Vectorizer → Order drone imagery** to open the order dialog.
-
-### Define the area (AOI)
-
-- **Draw on the map**  
-  Click **Draw AOI on map**. On the embedded map, left-click to add polygon vertices and right-click to finish (you need at least 3 points). The area is shown in hectares. Use **Clear** to remove the shape and start over.
-
-- **Or enter coordinates**  
-  Under **AOI by coordinates (lat/lng, WGS84)** enter latitude and longitude and click **Add point**. You can add up to 6 points (minimum 3 for a polygon). Click **Use points** to set the AOI from these coordinates; the map will zoom to the area. Use **Clear points** to remove the list and start again.
+- **Draw on the map** — **Draw AOI on map**; left-click vertices, right-click to finish; **Clear** to reset.  
+- **Coordinates** — Under **AOI by coordinates (lat/lng, WGS84)**, add points and **Use points**; **Clear points** to reset.
 
 ### Options
 
-- **Resolution (GSD)**  
-  - 1 cm GSD  
-  - 2 cm GSD  
-  - 5 cm GSD  
+- **Resolution (GSD):** 1 cm, 2 cm, or 5 cm.  
+- **Deliverable:** Orthomosaic, DSM, or point cloud.  
 
-- **Deliverable**  
-  - Orthomosaic  
-  - DSM  
-  - Point cloud  
+After the AOI is set, a **price estimate** is shown (based on $300/km²).
 
-After you set an AOI, a **price estimate** is shown (based on $300/km²).
+### Contact and submit
 
-### Contact details
-
-- **Name** (required)  
-- **Company** (optional)  
-- **Email** (required)  
-- **Phone** (optional)  
-
-### Submit
-
-Click **Submit request**. Your choices and contact details are sent to FieldWatch. A confirmation screen summarizes what was submitted. FieldWatch will follow up with you to confirm the order and next steps.
-
+Provide **name** and **email** (phone and company optional), then **Submit request**. FieldWatch will follow up.
 
 ## Troubleshooting
 
-### Plugin Not Appearing
-- Ensure the plugin folder is in the correct `python/plugins/` directory
-- Check that all required files are present
-- Restart QGIS after installation
-- Check **Plugins → Manage and Install Plugins → Installed** tab
+### Plugin not appearing
 
-### Processing Errors
-- Check the **QGIS Log Messages Panel** (View → Panels → Log Messages)
-- Filter by "VEC Plugin" to see detailed error messages
-- Ensure you have an internet connection
-- Verify the raster layer is valid and contains imagery
+- Confirm the folder lives under `python/plugins/` with all required files.  
+- Restart QGIS; check **Manage and Install Plugins → Installed**.
 
-### Polygon Drawing Issues
-- Ensure you have at least 3 points before right-clicking to finish
-- Make sure the map canvas is visible (dialog may hide during drawing)
-- Try clicking "Clear" and redrawing if needed
+### Processing errors
 
-### Upload Timeout
-- Large files may take several minutes to upload
-- The timeout is set to 600 seconds (10 minutes)
-- For very large areas, consider drawing a smaller polygon
+- Open **View → Panels → Log Messages** and filter for plugin messages.  
+- Check connectivity and that the raster is valid.
+
+### Polygon drawing
+
+- Need at least three vertices before finishing with right-click.  
+- The main dialog hides while drawing; finish on the map canvas.
+
+### Upload timeout
+
+- Large crops can take several minutes (long client timeout).  
+- Reduce area if uploads fail or time out.
 
 ## License
 
-This plugin is licensed under the MIT License. See [LICENSE](LICENSE) file for details.
+This plugin is licensed under the **MIT License**. See the [LICENSE](LICENSE) file.
 
 ## Support
 
-For issues, questions, or contributions, please visit:
+Issues and contributions:  
 https://github.com/fw-qgis-vectorizer/QGIS_Plugin
 
 ## Version
 
-Check `metadata.txt` for the current plugin version.
-
+See `metadata.txt` for the current version and changelog.
