@@ -280,11 +280,15 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                     "When your trial is used up, this becomes a link to get a paid licence."
                 )
             )
+            locked = trial_helpers.is_trial_generate_locked_for_current_trial(self._trial_id)
+            self.getLicenseKeyButton.setEnabled(not locked)
         else:
+            trial_helpers.clear_trial_generate_locked_trial_id()
             self.getLicenseKeyButton.setText(self.tr("Get Licence"))
             self.getLicenseKeyButton.setToolTip(
                 self.tr("Open FieldWatch in your browser to get a paid licence key.")
             )
+            self.getLicenseKeyButton.setEnabled(True)
 
     def _on_license_action_clicked(self):
         if self._license_action_is_generate_trial():
@@ -354,14 +358,21 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 tot = data.get("uses_total")
                 rem_s = str(rem) if rem is not None else "?"
                 tot_s = str(tot) if tot is not None else "?"
+                if show_success_dialog and tid_str:
+                    trial_helpers.set_trial_generate_locked_trial_id(tid_str)
                 QtWidgets.QMessageBox.information(
                     self,
                     self.tr("Trial key"),
                     clip_note
                     + self.tr("Trial status refreshed from the server.\n\nRuns remaining: {0} of {1}.").format(
                         rem_s, tot_s
+                    )
+                    + self.tr(
+                        "\n\nTo confirm this trial id here, paste it into the License key field "
+                        "and press Validate."
                     ),
                 )
+                self._update_license_action_button()
         except Exception as e:
             self.trial_status = None
             self.trialQuotaLabel.setText(
@@ -429,11 +440,91 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.order_imagery_dialog.show()
         self.order_imagery_dialog.raise_()
         self.order_imagery_dialog.activateWindow()
-    
+
+    @staticmethod
+    def _looks_like_trial_uuid(text):
+        """True if text is a canonical UUID string (server trial_id shape)."""
+        try:
+            uuid.UUID(str(text).strip())
+            return True
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    def _validate_pasted_trial_id(self, license_key):
+        """Validate pasted server trial id via GET /qgis/trial/state (not paid /auth/validate)."""
+        self.validateLicenseButton.setEnabled(False)
+        self.validateLicenseButton.setText(self.tr("Validating…"))
+        self.licenseStatusLabel.setText(self.tr("Validating trial key…"))
+        self.licenseStatusLabel.setStyleSheet("color: blue;")
+
+        old_tid = self._trial_id
+        self.jwt_token = None
+        self.license_key = None
+
+        try:
+            tid = str(uuid.UUID(license_key.strip()))
+            self._trial_id = tid
+            trial_helpers.set_stored_trial_id(tid)
+            data = trial_helpers.fetch_trial_state(
+                INFERENCE_BASE_URL,
+                self._install_key,
+                trial_id=tid,
+                timeout=10,
+            )
+            tid_r = data.get("trial_id")
+            if tid_r:
+                self._trial_id = tid_r
+                trial_helpers.set_stored_trial_id(tid_r)
+            self.trial_uses_total = data.get("uses_total")
+            self.trial_uses_remaining = data.get("uses_remaining")
+            self.trial_status = data.get("trial_state")
+            self._update_trial_quota_label()
+            self._sync_ok_button_state()
+
+            if self.trial_can_run():
+                self.licenseStatusLabel.setText(self.tr("✓ Trial key valid"))
+                self.licenseStatusLabel.setStyleSheet("color: green;")
+            elif self.trial_status == "exhausted" or (
+                self.trial_uses_remaining is not None and self.trial_uses_remaining <= 0
+            ):
+                self.licenseStatusLabel.setText(self.tr("✗ Trial exhausted"))
+                self.licenseStatusLabel.setStyleSheet("color: red;")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    self.tr("Trial key"),
+                    self.tr("This trial id has no runs left. Use Get Licence for a paid key."),
+                )
+            else:
+                self.licenseStatusLabel.setText(
+                    self.tr("✗ Trial not active ({0})").format(self.trial_status or "?")
+                )
+                self.licenseStatusLabel.setStyleSheet("color: red;")
+        except Exception as e:
+            self._trial_id = old_tid
+            if old_tid:
+                trial_helpers.set_stored_trial_id(old_tid)
+            else:
+                trial_helpers.clear_stored_trial_id()
+            self.licenseStatusLabel.setText(self.tr("✗ Trial key invalid"))
+            self.licenseStatusLabel.setStyleSheet("color: red;")
+            self._update_trial_quota_label()
+            self._sync_ok_button_state()
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("Trial key"),
+                self.tr(
+                    "This value is not a valid trial key for this installation, "
+                    "or the server rejected it.\n\nDetails:\n{0}"
+                ).format(str(e)[:500]),
+            )
+        finally:
+            self.validateLicenseButton.setEnabled(True)
+            self.validateLicenseButton.setText(self.tr("Validate"))
+
     def validate_license(self):
-        """Validate license key and get JWT token."""
+        """Validate paid license key (JWT) or a pasted server trial id (UUID)."""
         license_key = self.licenseKeyLineEdit.text().strip()
-        
+
         if not license_key:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -441,7 +532,11 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 "Please enter a license key."
             )
             return
-        
+
+        if self._looks_like_trial_uuid(license_key):
+            self._validate_pasted_trial_id(license_key)
+            return
+
         # Disable button during validation
         self.validateLicenseButton.setEnabled(False)
         self.validateLicenseButton.setText("Validating...")

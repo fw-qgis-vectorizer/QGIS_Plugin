@@ -107,6 +107,46 @@ def set_stored_trial_id(trial_id):
     s.endGroup()
 
 
+def clear_stored_trial_id():
+    """Remove persisted server trial_id (e.g. after failed paste validation)."""
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.remove("trial_id")
+    s.endGroup()
+
+
+_TRIAL_GENERATE_LOCK_KEY = "trial_generate_locked_trial_id"
+
+
+def set_trial_generate_locked_trial_id(trial_id: str) -> None:
+    """After user uses Generate Trial Key once for this trial_id, disable repeat until exhausted."""
+    tid = (trial_id or "").strip()
+    if not tid:
+        return
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue(_TRIAL_GENERATE_LOCK_KEY, tid)
+    s.endGroup()
+
+
+def clear_trial_generate_locked_trial_id() -> None:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.remove(_TRIAL_GENERATE_LOCK_KEY)
+    s.endGroup()
+
+
+def is_trial_generate_locked_for_current_trial(current_trial_id: str | None) -> bool:
+    tid = (current_trial_id or "").strip()
+    if not tid:
+        return False
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    locked = (s.value(_TRIAL_GENERATE_LOCK_KEY, "", type=str) or "").strip()
+    s.endGroup()
+    return locked == tid
+
+
 def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5):
     """
     GET /qgis/trial/state — read-only; never decrements uses.

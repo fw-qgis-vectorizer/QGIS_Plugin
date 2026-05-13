@@ -31,7 +31,7 @@
         <item>
          <widget class="QLineEdit" name="licenseKeyLineEdit">
           <property name="placeholderText">
-           <string>Enter your license key</string>
+           <string>Paid license key or trial UUID</string>
           </property>
          </widget>
         </item>
