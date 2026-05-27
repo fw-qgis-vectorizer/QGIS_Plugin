@@ -1,117 +1,202 @@
 # FieldWatch Vectorizer (QGIS plugin)
 
-QGIS plugin for **FieldWatch** vectorization: run AI segmentation on your raster imagery to produce building or solar-panel masks, integrated with the FieldWatch inference API.
+QGIS plugin for **FieldWatch**: AI-assisted vectorization on raster imagery — interactive map segmentation, cloud inference over large areas, and drone imagery ordering.
 
-## Features
+Works on **QGIS 3.x and 4.x** (Qt6-compatible).
 
-- **Polygon-based area selection** — Draw a polygon on the map to define the crop area for inference.
-- **Building and solar-panel detection** — Choose **Detection type** (e.g. Building or Solar panel) before running.
-- **Paid license and trial** — Enter a **paid license key** and **Validate** for JWT-backed runs, or use the **trial** flow (install key, trial UUID, server-backed quota). The dialog shows **trial quota** and a single control to **Generate Trial Key** or open FieldWatch for a full licence, depending on state.
-- **Automated pipeline** — Crops/compresses the raster, uploads, runs inference, downloads results, and loads the vector layer (and optional summary table when the API returns one).
-- **Progress and status** — Progress bar and status text during processing.
-- **Run / Cancel / Refresh** — **Run** starts processing while keeping the dialog open; **Cancel** closes the dialog; **Refresh** resets crop/UI progress and refreshes trial state from the server.
-- **Order drone imagery** — Request orthomosaic, DSM, or point cloud for an AOI (drawn on a map or from coordinates), with resolution, estimate, and contact submission to FieldWatch.
-- **Help and feedback** — **How to use this plugin** opens the walkthrough video; **Send feedback** opens a short form that posts feedback to FieldWatch.
+## Opening the plugin
+
+**Plugins → FieldWatch Vectorizer → FieldWatch** (or the toolbar binocular icon).
+
+This opens **The FieldWatch Pack** — a landing page with three workflow buttons and shared footer actions.
+
+---
+
+## The three workflows
+
+| Workflow | What it does | Where it runs |
+|----------|----------------|---------------|
+| **One-Click Segmentation** | Click roofs on the map; SAM-based masks in QGIS (local model) | Separate window |
+| **Large Area Vectorization** | Draw a polygon; cloud API detects buildings or solar panels | Main pack dialog |
+| **Order Drone Imagery** | Request orthomosaic, DSM, or point cloud for an AOI | Separate window |
+
+Licence and trial state are **shared across workflows** (same QGIS profile), but each page applies its own rules (see below).
+
+---
+
+## 1. One-Click Segmentation
+
+Interactive segmentation on your raster — left-click to add a roof, right-click to remove a mask. Best for refining individual structures on imagery you already have loaded.
+
+### Open
+
+Landing → **One-Click Segmentation**.
+
+### First-time setup (in the segmentation window)
+
+1. **Install dependencies** — Downloads a portable Python 3.12 runtime (if needed), then installs PyTorch and the model engine into `~/.qgis_fieldwatch/model/venv/`.
+2. **Download model** — Fetches `model` weights from FieldWatch hosting into `~/.qgis_fieldwatch/model/checkpoints/`.
+
+You can also click **Start segmentation** and the plugin will run missing setup steps automatically.
+
+### Licence (required to start)
+
+- **Paid licence** — Enter your key → **Validate** → status shows **✓ Valid** → **Start segmentation** enables.
+- **Trial** — Trial runs are auto-activated on first open (server decides). **Start** is enabled only when the server reports **3 trial runs remaining** (full quota). After a trial session is used, remaining runs drop below 3 and **Start** stays disabled until you **Validate a paid licence** (“Add licence key to use.”).
+
+Trial quota on this page is read from **local cache** when you refresh; opening the page performs **one quick server check** (unless a paid licence is already stored).
+
+### Run
+
+1. Add a **raster layer** to the project.
+2. Select it in **Input raster layer** → **Refresh** if needed.
+3. **Start segmentation** — first launch may take ~1 minute to load the model.
+4. Click on the map: **left** = add mask, **right** = remove. **Space + drag** or middle mouse to pan.
+5. **Save all to layer** — writes polygons to a memory/vector layer (uses trial quota or paid licence as configured).
+6. **Stop segmentation** when finished.
+7. **Back** returns to the landing page.
+
+---
+
+## 2. Large Area Vectorization
+
+Cloud inference over a **polygon crop** of your raster — building or solar-panel detection at scale. Results come back as vector layers (and optional summary tables) from the FieldWatch API.
+
+### Open
+
+Landing → **Large Area Vectorization**.
+
+### Licence
+
+The licence panel is at the **top of this page**:
+
+- **Validate** a paid licence key, or paste a trial UUID.
+- **Trial quota** is fetched from the server when you open the page or click **Refresh** (live status, not cached like one-click).
+- **Run** stays disabled until a polygon is drawn **and** you have a valid paid JWT or active trial with runs remaining.
+
+### Run
+
+1. Add a **raster layer** to the project.
+2. Choose **Input raster layer** and **Detection type** (Building or Solar panel).
+3. **Draw Polygon** on the map (≥3 vertices, finish with **right-click**). The dialog hides while drawing.
+4. Set **Output layer name** (default: `Building_Detections`).
+5. **Run** — dialog stays open; progress bar shows crop, upload, inference, and download.
+6. On success, vector (and optional CSV/summary) layers are added to the project.
+7. **Back** returns to the landing page.
+
+**Refresh** resets the crop/UI and refreshes trial state from the server.
+
+---
+
+## 3. Order Drone Imagery
+
+Submit an area-of-interest to FieldWatch for a **quote and follow-up** on drone capture and deliverables. Does not run inference in QGIS.
+
+### Open
+
+Landing → **Order Drone Imagery** (separate window).
+
+### Define AOI
+
+- **Draw on the map** — **Draw AOI on map**; left-click vertices, right-click to finish; **Clear** to reset.
+- **Coordinates** — Under **AOI by coordinates (lat/lng, WGS84)**, add points and **Use points**; **Clear points** to reset.
+
+### Options
+
+- **Resolution (GSD):** 1 cm, 2 cm, or 5 cm.
+- **Deliverable:** Orthomosaic, DSM, or point cloud.
+
+A **price estimate** appears after the AOI is set (based on $300/km²).
+
+### Submit
+
+Enter **name** and **email** (phone and company optional), then **Submit request**. FieldWatch will contact you.
+
+No licence key is required for this form.
+
+---
+
+## Landing page (shared)
+
+- **Get Licence** — Opens [usefieldwatch.com](https://usefieldwatch.com/) in your browser.
+- **How to use this plugin** — Walkthrough video.
+- **Send feedback** — Short form posted to FieldWatch.
+
+---
 
 ## Requirements
 
-- QGIS 3.x  
-- Python 3.x (bundled with QGIS)  
-- Internet access for API calls  
+- QGIS 3.0+ or QGIS 4.x  
+- Internet access for API calls, licence validation, and (for one-click) first-time dependency/weight downloads  
+- One-click segmentation: Windows benefits from Python 3.12 wheels; ~300+ MB disk for model weights and venv under `~/.qgis_fieldwatch/model/`
+
+---
 
 ## Installation
 
-### Clone into the QGIS plugins folder (recommended)
+### Install from ZIP (recommended for end users)
 
-The repository root **is** the plugin package (it contains `metadata.txt`, `__init__.py`, etc.). Clone it so the directory name under `python/plugins/` matches how you manage plugins (often `vec_plugin`):
+1. Build or obtain `vec_plugin.zip` (see `package_vec_plugin.ps1` on Windows).
+2. QGIS → **Plugins → Manage and Install Plugins → Install from ZIP**.
+3. Enable **FieldWatch Vectorizer**.
 
-**Windows (Command Prompt or PowerShell)** — from your profile’s `python\plugins` folder (open it via **Settings → User Profiles → Open Active Profile Folder**, then enter `python\plugins`):
+The zip does **not** include weights or the Python venv; those download at runtime for one-click segmentation.
+
+### Clone into the QGIS plugins folder
+
+**Windows** — from your profile’s `python\plugins` folder:
 
 ```bat
 cd %APPDATA%\QGIS\QGIS3\profiles\default\python\plugins
 git clone https://github.com/fw-qgis-vectorizer/QGIS_Plugin.git vec_plugin
 ```
 
-**macOS / Linux** — use the same path inside your active QGIS profile’s `python/plugins` directory, then:
+**macOS / Linux** — same path under your active QGIS profile’s `python/plugins/`.
 
-```bash
-git clone https://github.com/fw-qgis-vectorizer/QGIS_Plugin.git vec_plugin
-```
+Then enable under **Plugins → Manage and Install Plugins → Installed**.
 
-Then enable the plugin under **Plugins → Manage and Install Plugins → Installed** (search for **FieldWatch Vectorizer**).
-
-### Or copy manually
-
-1. Open **Settings → User Profiles → Open Active Profile Folder** in QGIS.  
-2. Go to `python/plugins/`.  
-3. Place this plugin as a single folder (for example `vec_plugin/`) containing `__init__.py`, `metadata.txt`, `vec_plugin.py`, and the rest of the files from this repository.
-
-### Install from ZIP (QGIS)
-
-Zip the plugin folder so the archive contains one top-level folder (e.g. `vec_plugin/...`). In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**.
-
-## Usage
-
-1. Add a suitable **raster layer** to the project.  
-2. Open **Plugins → FieldWatch Vectorizer → FieldWatch** (toolbar: same action).  
-3. **License** — Validate a paid key and/or use the trial controls as prompted; confirm trial quota if you are not on a paid JWT.  
-4. Choose the **input raster** and **detection type**.  
-5. Click **Draw Polygon**, finish with **right-click** (at least three vertices).  
-6. Set an **output layer name** if you want (default: `Building_Detections`).  
-7. Click **Run** — the dialog stays open while processing; when finished, layers are added and the map may zoom to results.  
-8. Use **Cancel** to close, or **Refresh** to reset the dialog and refresh trial state.
-
-## Order drone imagery
-
-Use **Plugins → FieldWatch Vectorizer → Order drone imagery**.
-
-### AOI
-
-- **Draw on the map** — **Draw AOI on map**; left-click vertices, right-click to finish; **Clear** to reset.  
-- **Coordinates** — Under **AOI by coordinates (lat/lng, WGS84)**, add points and **Use points**; **Clear points** to reset.
-
-### Options
-
-- **Resolution (GSD):** 1 cm, 2 cm, or 5 cm.  
-- **Deliverable:** Orthomosaic, DSM, or point cloud.  
-
-After the AOI is set, a **price estimate** is shown (based on $300/km²).
-
-### Contact and submit
-
-Provide **name** and **email** (phone and company optional), then **Submit request**. FieldWatch will follow up.
+---
 
 ## Troubleshooting
 
 ### Plugin not appearing
 
-- Confirm the folder lives under `python/plugins/` with all required files.  
-- Restart QGIS; check **Manage and Install Plugins → Installed**.
+- Confirm the folder is under `python/plugins/` with `metadata.txt` and `__init__.py`.
+- Check `qgisMaximumVersion` in `metadata.txt` for QGIS 4.
+- Restart QGIS.
 
-### Processing errors
+### One-click: dependencies or weights
 
-- Open **View → Panels → Log Messages** and filter for plugin messages.  
-- Check connectivity and that the raster is valid.
+- Delete `~/.qgis_fieldwatch/model/venv` and retry **Install dependencies**.
+- Delete incomplete files in `~/.qgis_fieldwatch/model/checkpoints/` and retry **Download model**.
 
-### Polygon drawing
+### One-click: Start disabled
 
-- Need at least three vertices before finishing with right-click.  
-- The main dialog hides while drawing; finish on the map canvas.
+- Validate a **paid licence**, or ensure trial shows **3 runs remaining**.
+- Add a raster layer and click **Refresh**.
 
-### Upload timeout
+### Large area: Run disabled
 
-- Large crops can take several minutes (long client timeout).  
-- Reduce area if uploads fail or time out.
+- Draw a polygon and validate licence or activate trial with remaining runs.
+
+### Processing / API errors
+
+- **View → Panels → Log Messages** — filter for `FieldWatch`.
+- Check network, firewall, and proxy settings.
+
+### Polygon / AOI drawing
+
+- At least three vertices; finish with **right-click** on the map canvas.
+
+---
 
 ## License
 
-This plugin is licensed under the **MIT License**. See the [LICENSE](LICENSE) file.
+MIT License — see [LICENSE](LICENSE).
 
 ## Support
 
-Issues and contributions:  
-https://github.com/fw-qgis-vectorizer/QGIS_Plugin
+- Website: https://usefieldwatch.com/  
+- Issues: https://github.com/fw-qgis-vectorizer/QGIS_Plugin  
 
-## Version
-
-See `metadata.txt` for the current version and changelog.
+Version and changelog: `metadata.txt`.

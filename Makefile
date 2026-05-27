@@ -87,8 +87,8 @@ default:
 
 compile: $(COMPILED_RESOURCE_FILES)
 
-%.py : %.qrc $(RESOURCES_SRC)
-	pyrcc5 -o $*.py  $<
+resources/resources.py: resources/resources.qrc
+	python3 compile_resources.py || python compile_resources.py
 
 %.qm : %.ts
 	$(LRELEASE) $<

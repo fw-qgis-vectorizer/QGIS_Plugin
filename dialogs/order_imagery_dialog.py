@@ -7,8 +7,19 @@ to avoid native crash. User draws AOI on the map inside the dialog.
 import math
 import requests
 from qgis.PyQt import QtWidgets, QtCore
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
+
+from ..core.qt_compat import (
+    AlignLeft,
+    AlignTop,
+    FrameNoFrame,
+    LeftButton,
+    PlainText,
+    RightButton,
+    ScrollBarAsNeeded,
+    blue as qt_blue,
+    red as qt_red,
+)
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QLabel, QPushButton, QComboBox, QLineEdit, QMessageBox,
@@ -40,7 +51,7 @@ class SimplePolygonMapTool(QgsMapTool):
         self.rubber_band = None
 
     def canvasReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == RightButton:
             if len(self.points) >= 3:
                 polygon_points = self.points + [self.points[0]]
                 geometry = QgsGeometry.fromPolygonXY([polygon_points])
@@ -49,14 +60,14 @@ class SimplePolygonMapTool(QgsMapTool):
                 self.finished.emit(QgsGeometry())
             self._cleanup_rubber_band()
             self.points = []
-        elif event.button() == Qt.LeftButton:
+        elif event.button() == LeftButton:
             point = self.toMapCoordinates(event.pos())
             self.points.append(QgsPointXY(point))
             if self.rubber_band is None:
                 self.rubber_band = QgsRubberBand(
                     self.canvas, QgsWkbTypes.PolygonGeometry
                 )
-                self.rubber_band.setColor(Qt.red)
+                self.rubber_band.setColor(qt_red)
                 self.rubber_band.setWidth(2)
                 # Semi-transparent fill so underlying imagery is visible
                 self.rubber_band.setFillColor(QColor(255, 0, 0, 60))
@@ -268,9 +279,9 @@ class OrderImageryDialog(QDialog):
         form_scroll = QScrollArea()
         form_scroll.setWidget(form_page)
         form_scroll.setWidgetResizable(True)
-        form_scroll.setFrameShape(QFrame.NoFrame)
-        form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        form_scroll.setFrameShape(FrameNoFrame)
+        form_scroll.setHorizontalScrollBarPolicy(ScrollBarAsNeeded)
+        form_scroll.setVerticalScrollBarPolicy(ScrollBarAsNeeded)
         self.stacked_widget.addWidget(form_scroll)
 
         # --- Page 1: Confirmation (shown after successful submit) ---
@@ -281,13 +292,13 @@ class OrderImageryDialog(QDialog):
         conf_layout.addWidget(self.confirmation_title)
         self.confirmation_text = QLabel()
         self.confirmation_text.setWordWrap(True)
-        self.confirmation_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.confirmation_text.setAlignment(AlignLeft | AlignTop)
         scroll = QScrollArea()
         scroll.setWidget(self.confirmation_text)
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(FrameNoFrame)
+        scroll.setHorizontalScrollBarPolicy(ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(ScrollBarAsNeeded)
         conf_layout.addWidget(scroll)
         done_btn = QPushButton("Close")
         done_btn.clicked.connect(self.close)
@@ -520,7 +531,7 @@ class OrderImageryDialog(QDialog):
         points.append(points[0])  # close ring
         geom = QgsGeometry.fromPolygonXY([points])
         self._goto_point_rb = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
-        self._goto_point_rb.setColor(Qt.blue)
+        self._goto_point_rb.setColor(qt_blue)
         self._goto_point_rb.setWidth(2)
         self._goto_point_rb.setFillColor(QColor(0, 0, 255, 80))
         self._goto_point_rb.setToGeometry(geom, None)
@@ -574,7 +585,7 @@ class OrderImageryDialog(QDialog):
         # Draw polygon on embedded canvas (clear previous manual polygon if any)
         if self._manual_points_rb is None:
             self._manual_points_rb = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
-            self._manual_points_rb.setColor(Qt.red)
+            self._manual_points_rb.setColor(qt_red)
             self._manual_points_rb.setWidth(2)
             # Semi-transparent fill so underlying imagery is visible
             self._manual_points_rb.setFillColor(QColor(255, 0, 0, 60))
@@ -725,7 +736,7 @@ class OrderImageryDialog(QDialog):
         for i, pt in enumerate(polygon_coords, 1):
             lines.append("  {}. lat: {:.6f}, lng: {:.6f}".format(i, pt["lat"], pt["lng"]))
         self.confirmation_text.setText("\n".join(lines))
-        self.confirmation_text.setTextFormat(Qt.PlainText)
+        self.confirmation_text.setTextFormat(PlainText)
         self.stacked_widget.setCurrentIndex(1)
 
     def showEvent(self, event):

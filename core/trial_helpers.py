@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Trial API helpers: install_key persistence, GET /qgis/trial/state, POST /qgis/trial/usage."""
+"""Trial API helpers: install key, server quota state, key issuance, usage debit."""
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -11,13 +12,15 @@ from urllib.parse import urlencode
 import requests
 from qgis.core import QgsApplication, QgsMessageLog, QgsSettings, Qgis
 
+from .api_config import ApiRoutes
+
 
 SETTINGS_GROUP = "vec_plugin"
 
 
 def _plugin_version():
     try:
-        meta = os.path.join(os.path.dirname(__file__), "metadata.txt")
+        meta = os.path.join(os.path.dirname(__file__), "..", "metadata.txt")
         with open(meta, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -116,10 +119,34 @@ def clear_stored_trial_id():
 
 
 _TRIAL_GENERATE_LOCK_KEY = "trial_generate_locked_trial_id"
+_TRIAL_ESTABLISHED_KEY = "trial_established"
+
+
+def mark_trial_established() -> None:
+    """User explicitly generated or validated a trial key (not silent server bootstrap)."""
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue(_TRIAL_ESTABLISHED_KEY, True)
+    s.endGroup()
+
+
+def is_trial_established() -> bool:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    value = s.value(_TRIAL_ESTABLISHED_KEY, False, type=bool)
+    s.endGroup()
+    return bool(value)
+
+
+def clear_trial_established() -> None:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.remove(_TRIAL_ESTABLISHED_KEY)
+    s.endGroup()
 
 
 def set_trial_generate_locked_trial_id(trial_id: str) -> None:
-    """After user uses Generate Trial Key once for this trial_id, disable repeat until exhausted."""
+    """Lock the current trial id after first successful activation until exhausted."""
     tid = (trial_id or "").strip()
     if not tid:
         return
@@ -147,21 +174,74 @@ def is_trial_generate_locked_for_current_trial(current_trial_id: str | None) -> 
     return locked == tid
 
 
-def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5):
-    """
-    GET /qgis/trial/state — read-only; never decrements uses.
+def trial_id_from_response(data: dict | None) -> str:
+    """Extract trial UUID from server JSON (supports alternate key names)."""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("trial_id", "trial_key", "trial_key_id"):
+        value = data.get(key)
+        if value:
+            return str(value).strip()
+    return ""
 
-    Query: install_key (required), trial_id (optional UUID), plugin_version, qgis_version.
-    Success 200 JSON keys: trial_id, uses_total, uses_remaining, trial_state, server_time.
-    Response may include Cache-Control: no-store (server); auth none.
 
-    :returns: dict with trial_id, uses_total, uses_remaining, trial_state, server_time
-    :raises: Exception on HTTP/network errors
-    """
+def normalize_trial_response(data: dict) -> dict:
+    """Ensure canonical trial_id + trial_state keys for apply_server_state."""
+    if not isinstance(data, dict):
+        return data
+    tid = trial_id_from_response(data)
+    if tid:
+        data["trial_id"] = tid
+    state = data.get("trial_state") or data.get("trial_status")
+    if state:
+        data["trial_state"] = str(state)
+    return data
+
+
+def request_trial_generate(inference_base_url, install_key, timeout=15) -> dict:
+    """Ask the server to issue a new trial for this install_key (must return trial_id)."""
     if not (install_key or "").strip():
         raise Exception("MISSING_INSTALL_KEY: install_key is required")
 
-    base = inference_base_url.rstrip("/")
+    url = ApiRoutes.qgis_trial_generate(inference_base_url)
+    body = {"install_key": install_key.strip()}
+    body.update(client_telemetry())
+    try:
+        r = requests.post(url, json=body, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Trial generate request failed: {e}") from e
+
+    if r.status_code == 404:
+        return fetch_trial_state(
+            inference_base_url, install_key, trial_id=None, timeout=timeout
+        )
+
+    if r.status_code == 503:
+        raise Exception(
+            "Trials are temporarily unavailable (server). Please try again later or use a paid license key."
+        )
+    if r.status_code >= 400:
+        err = _parse_error_body(r)
+        raise Exception(err or f"Trial generate failed (HTTP {r.status_code}).")
+
+    try:
+        data = r.json()
+    except ValueError as e:
+        raise Exception("Trial generate returned invalid JSON.") from e
+
+    data = normalize_trial_response(data)
+    if not trial_id_from_response(data):
+        raise Exception(
+            "Trial generate succeeded but the server did not return a trial_id."
+        )
+    return data
+
+
+def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5):
+    """Read trial quota from the server (never decrements uses)."""
+    if not (install_key or "").strip():
+        raise Exception("MISSING_INSTALL_KEY: install_key is required")
+
     params = {"install_key": install_key.strip()}
     tid = (trial_id or "").strip()
     if tid:
@@ -172,7 +252,7 @@ def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5)
             # Ignore corrupt stored trial_id; bootstrap by install_key only.
             pass
     params.update(client_telemetry())
-    url = f"{base}/qgis/trial/state?{urlencode(params)}"
+    url = f"{ApiRoutes.qgis_trial_state(inference_base_url)}?{urlencode(params)}"
     try:
         r = requests.get(url, timeout=timeout)
     except requests.exceptions.RequestException as e:
@@ -191,7 +271,7 @@ def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5)
     except ValueError as e:
         raise Exception("Trial status returned invalid JSON.") from e
 
-    return data
+    return normalize_trial_response(data)
 
 
 def _usage_terminal_safe_to_clear_client_idempotency_key(status_code, data):
@@ -213,31 +293,138 @@ def _usage_terminal_safe_to_clear_client_idempotency_key(status_code, data):
     return False
 
 
+def network_reachable(timeout=3):
+    """Quick connectivity check (inference host HEAD/GET)."""
+    try:
+        from .api_config import INFERENCE_BASE_URL
+
+        base = (INFERENCE_BASE_URL or "").rstrip("/")
+        if not base:
+            return False
+        r = requests.get(f"{base}/health", timeout=timeout)
+        return r.status_code < 500
+    except Exception:
+        try:
+            from .api_config import INFERENCE_BASE_URL
+
+            base = (INFERENCE_BASE_URL or "").rstrip("/")
+            if not base:
+                return False
+            r = requests.get(base, timeout=timeout)
+            return r.status_code < 500
+        except Exception:
+            return False
+
+
+def save_cached_trial_state(uses_total, uses_remaining, trial_status):
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    if uses_total is not None:
+        s.setValue("cached_uses_total", int(uses_total))
+    if uses_remaining is not None:
+        s.setValue("cached_uses_remaining", int(uses_remaining))
+    if trial_status is not None:
+        s.setValue("cached_trial_status", str(trial_status))
+    s.endGroup()
+
+
+def load_cached_trial_state():
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    total = s.value("cached_uses_total", None)
+    rem = s.value("cached_uses_remaining", None)
+    status = s.value("cached_trial_status", "", type=str) or None
+    s.endGroup()
+    out = {}
+    if total is not None and str(total).strip() != "":
+        try:
+            out["uses_total"] = int(total)
+        except (TypeError, ValueError):
+            pass
+    if rem is not None and str(rem).strip() != "":
+        try:
+            out["uses_remaining"] = int(rem)
+        except (TypeError, ValueError):
+            pass
+    if status:
+        out["trial_status"] = status
+    return out
+
+
+def load_pending_usage_keys():
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    raw = s.value("pending_usage_keys", "[]", type=str) or "[]"
+    s.endGroup()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def save_pending_usage_keys(entries):
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue("pending_usage_keys", json.dumps(entries or []))
+    s.endGroup()
+
+
+def append_pending_usage(idempotency_key, action="one_click_export"):
+    pending = load_pending_usage_keys()
+    key = (idempotency_key or "")[:128]
+    if not key:
+        return
+    if any(e.get("idempotency_key") == key for e in pending):
+        return
+    pending.append({"idempotency_key": key, "action": action})
+    save_pending_usage_keys(pending)
+
+
+def save_paid_license(jwt_token, license_key, token_expiry=None):
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue("paid_jwt_token", jwt_token or "")
+    s.setValue("paid_license_key", license_key or "")
+    if token_expiry is not None:
+        s.setValue("paid_token_expiry", str(token_expiry))
+    s.endGroup()
+
+
+def load_paid_license():
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    jwt = s.value("paid_jwt_token", "", type=str) or ""
+    key = s.value("paid_license_key", "", type=str) or ""
+    expiry_raw = s.value("paid_token_expiry", "", type=str) or ""
+    s.endGroup()
+    out = {"jwt_token": jwt or None, "license_key": key or None, "token_expiry": expiry_raw or None}
+    return out
+
+
+def clear_paid_license():
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    for k in ("paid_jwt_token", "paid_license_key", "paid_token_expiry"):
+        s.remove(k)
+    s.endGroup()
+
+
 def post_trial_usage(
     inference_base_url,
     trial_id,
     install_key,
     idempotency_key,
+    action=None,
     timeout=30,
     max_transient_retries=3,
 ):
     """
-    POST /qgis/trial/usage — atomic consume / deny.
+    Debit one trial use on the server (atomic allow/deny).
 
-    JSON body: trial_id, install_key, idempotency_key (max 128 chars on server), optional
-    plugin_version, qgis_version. ``action`` omitted (server defaults to infer).
-    Content-Type: application/json. Auth: none.
-
-    Idempotency: same (trial_id, idempotency_key) must receive the same JSON as the first
-    response; on transient network errors we retry with the **same** idempotency_key.
-
-    :returns: ``(data, safe_to_clear_local_idempotency_key)`` where ``data`` is the parsed
-        JSON body. ``safe_to_clear_local_idempotency_key`` is True only for definitive
-        outcomes (2xx, or 4xx with ``allowed: false``); False on connection/timeout
-        exhaustion (caller raised), and never True for 5xx (caller raises after retries).
+    Returns ``(data, safe_to_clear_local_idempotency_key)``.
     """
-    base = inference_base_url.rstrip("/")
-    url = f"{base}/qgis/trial/usage"
+    url = ApiRoutes.qgis_trial_usage(inference_base_url)
     # Server max length 128; standard UUID is 36 chars.
     idem = (idempotency_key or "")[:128]
     if not idem:
@@ -254,6 +441,8 @@ def post_trial_usage(
         "install_key": (install_key or "").strip(),
         "idempotency_key": idem,
     }
+    if action:
+        body["action"] = str(action)
     body.update(client_telemetry())
 
     attempts = max(1, max_transient_retries)

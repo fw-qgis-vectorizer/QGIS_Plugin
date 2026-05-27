@@ -6,12 +6,13 @@
 [general]
 name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
-description=Vectorization inference service for building detection
-version=2.3.3
+qgisMaximumVersion=4.99
+description=One-Click and large area vectorization inference service for building detection, drone imagery ordering.
+version=4.0
 author=FieldWatch
 email=support@usefieldwatch.com
 
-about=Generate vector masks of features from Geotiff images.
+about=FieldWatch Vectorizer turns geotiff imagery into vector masks inside QGIS: click individual roofs with one-click segmentation, run cloud inference over a drawn AOI for buildings or solar panels, or order drone orthomosaics and related products. A free trial starts automatically on first use; a paid licence unlocks full access across all workflows. Learn more at https://usefieldwatch.com/
 
 tracker=https://github.com/fw-qgis-vectorizer/QGIS_Plugin/issues
 repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
@@ -22,13 +23,13 @@ repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
 
 hasProcessingProvider=no
 # Uncomment the following line and add your changelog:
-changelog=2.3.3: lock Generate Trial after first use; Validate accepts trial UUID; 2.3.2: trial dialog+clipboard; 2.3.1: telemetry.
+changelog=4.0: one-click segmentation, auto-trial, QGIS 3/4 + Qt6, feedback, unload fix.
 
 # Tags are comma separated with spaces allowed
 tags=raster,vector,ai,machine learning,building detection,segmentation,inference
 
 homepage=https://usefieldwatch.com/
-icon=binocular.png
+icon=resources/icons/binocular.png
 # experimental flag
 experimental=False
 

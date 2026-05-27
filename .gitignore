@@ -4,14 +4,22 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.egg-info/
+
+# Virtual env / portable Python (dev)
+.venv/
+venv/
+portable_python/
+wheels/
 
 # QGIS
 *.qmlc
 *.jsc
 
-# IDE
+# IDE / editor
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -20,24 +28,40 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Build artifacts
+# Build / package output
+vec_plugin.zip
 *.zip
 dist/
 build/
-*.egg-info/
-
-# Test files (optional - uncomment if you don't want to include tests)
-# test/
-
-# Help build files
 help/build/
 
-# Temporary files
+# Env / secrets
+.env
+.env.*
+.env.local
+
+# Local model cache & weights (runtime under ~/.qgis_fieldwatch; never commit)
+.local/
+checkpoints/
+*.pt
+*.pth
+*.whl
+*.onnx
+*.safetensors
+*.bin
+
+# Dev-only scripts (not shipped in plugin zip)
+scripts/
+
+# Temporary / scratch
 *.tmp
 *.log
 f.txt
-
 *.bat
-*.ps1
 
-*.md
+# Reference plugin (TerraLab) — not part of FieldWatch release
+folder/
+
+# Sample / ad-hoc data
+*.sh
+*.ps1

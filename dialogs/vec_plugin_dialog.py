@@ -33,15 +33,41 @@ from qgis.core import QgsProject, QgsGeometry, QgsWkbTypes, QgsPointXY, QgsMessa
 from qgis.gui import QgsMapToolCapture, QgsRubberBand
 from .order_imagery_dialog import OrderImageryDialog
 from .feedback_dialog import FeedbackDialog
-from .api_config import INFERENCE_BASE_URL
+from ..core.api_config import INFERENCE_BASE_URL
+from ..core import trial_helpers
+from ..core.qt_compat import (
+    LeftButton,
+    PointingHandCursor,
+    RightButton,
+    RightToLeft,
+    dialog_exec,
+    red as qt_red,
+)
+from ..core.trial_access import shared as trial_shared
+from ..core.trial_workers import TrialGenerateWorker, TrialStateFetchWorker
 
 # Browser destination for paid licence keys.
 FIELDWATCH_HOME_URL = "https://usefieldwatch.com/"
-from . import trial_helpers
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
-    os.path.dirname(__file__), 'vec_plugin_dialog_base.ui'))
+    os.path.dirname(__file__), '..', 'ui', 'vec_plugin_dialog_base.ui'))
+
+_PAGE_LANDING = 0
+_PAGE_ONE_CLICK = 1
+_PAGE_VECTORIZATION = 2
+
+_LANDING_ACTION_STYLE = (
+    "QPushButton {"
+    " text-align: left;"
+    " padding: 12px 14px 12px 16px;"
+    " font-size: 13px;"
+    " border: 1px solid palette(mid);"
+    " border-radius: 4px;"
+    "}"
+    "QPushButton:hover { background: palette(alternate-base); }"
+)
+_LANDING_ICON_SIZE = QtCore.QSize(28, 28)
 
 
 class PolygonCaptureTool(QgsMapToolCapture):
@@ -57,7 +83,7 @@ class PolygonCaptureTool(QgsMapToolCapture):
     
     def canvasReleaseEvent(self, event):
         """Handle mouse release events."""
-        if event.button() == QtCore.Qt.RightButton:
+        if event.button() == RightButton:
             # Right click finishes the polygon
             if len(self.points) >= 3:
                 # Create polygon from points
@@ -69,14 +95,14 @@ class PolygonCaptureTool(QgsMapToolCapture):
                 self.finished.emit(QgsGeometry())
             self._cleanup_rubber_band()
             self.points = []
-        elif event.button() == QtCore.Qt.LeftButton:
+        elif event.button() == LeftButton:
             # Left click adds a point
             point = self.toMapCoordinates(event.pos())
             self.points.append(QgsPointXY(point))
             # Draw temporary rubber band
             if self.rubber_band is None:
                 self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
-                self.rubber_band.setColor(QtCore.Qt.red)
+                self.rubber_band.setColor(qt_red)
                 self.rubber_band.setWidth(2)
                 # Match order imagery dialog styling: semi-transparent red fill
                 self.rubber_band.setFillColor(QtGui.QColor(255, 0, 0, 60))
@@ -105,6 +131,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     polygon_drawn = QtCore.pyqtSignal(QgsGeometry)
     # Signal emitted when Run is clicked (but dialog stays open)
     processing_started = QtCore.pyqtSignal()
+    # Open one-click segmentation settings (small window)
+    one_click_requested = QtCore.pyqtSignal()
     
     def __init__(self, parent=None, iface=None):
         """Constructor."""
@@ -122,27 +150,42 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
         
-        # Initialize license-related variables
-        self.license_key = None
-        self.jwt_token = None
-        self.token_expiry = None
-
-        # Trial (GET /qgis/trial/state + usage before runs; no JWT)
-        self._install_key = trial_helpers.ensure_install_key()
-        self._trial_id = trial_helpers.get_stored_trial_id() or None
-        self.trial_uses_total = None
-        self.trial_uses_remaining = None
-        self.trial_status = None  # API trial_state: active | exhausted | revoked
-        # One idempotency_key per trial billable attempt (OK click); reused on network retry until POST completes.
+        # Trial + licence (shared profile state via trial_access)
+        self._trial_acc = trial_shared()
+        self._install_key = self._trial_acc.install_key
+        self._trial_id = self._trial_acc.trial_id
+        self.trial_uses_total = self._trial_acc.uses_total
+        self.trial_uses_remaining = self._trial_acc.uses_remaining
+        self.trial_status = self._trial_acc.trial_status
         self._trial_billable_idempotency_key = None
+        self.license_key = self._trial_acc.license_key
+        self.jwt_token = self._trial_acc.jwt_token
+        self.token_expiry = self._trial_acc.token_expiry
+        self._trial_state_worker = None
+        self._trial_generate_worker = None
+        self._trial_refresh_show_error_dialog = False
+        self._trial_refresh_show_success_dialog = False
 
         self.trialQuotaLabel = QtWidgets.QLabel("")
         self.trialQuotaLabel.setWordWrap(True)
+        self._trial_quota_spinner = QtWidgets.QProgressBar()
+        self._trial_quota_spinner.setRange(0, 0)
+        self._trial_quota_spinner.setFixedWidth(100)
+        self._trial_quota_spinner.setFixedHeight(14)
+        self._trial_quota_spinner.setTextVisible(False)
+        self._trial_quota_spinner.setVisible(False)
+        self.trialQuotaContainer = QtWidgets.QWidget()
+        _quota_row = QtWidgets.QHBoxLayout(self.trialQuotaContainer)
+        _quota_row.setContentsMargins(0, 0, 0, 0)
+        _quota_row.addWidget(self._trial_quota_spinner)
+        _quota_row.addWidget(self.trialQuotaLabel, 1)
         self.licenseFormLayout.addRow(
             QtWidgets.QLabel(self.tr("Trial quota:")),
-            self.trialQuotaLabel,
+            self.trialQuotaContainer,
         )
-        
+
+        self._setup_page_navigation()
+
         # Populate the input layer combo box with raster layers
         self.populate_layers()
         
@@ -161,33 +204,251 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # Connect license validation button
         self.validateLicenseButton.clicked.connect(self.validate_license)
         
-        # One morphing button: Generate Trial Key (refresh/bootstrap) until trial is exhausted,
-        # then Get Licence (opens FieldWatch). Paid JWT always shows Get Licence.
+        # CTA button: shown only when a paid licence is needed.
         self.getLicenseKeyButton.clicked.connect(self._on_license_action_clicked)
         self._update_license_action_button()
 
-        if hasattr(self, "howToUsePluginButton"):
-            self.howToUsePluginButton.clicked.connect(self.open_how_to_use_plugin_video)
-
-        if hasattr(self, "sendFeedbackButton"):
-            self.sendFeedbackButton.clicked.connect(self.open_feedback_dialog)
-
-        # Connect Order drone imagery button
-        if hasattr(self, "orderImageryButton"):
-            self.orderImageryButton.clicked.connect(self.open_order_imagery_dialog)
-        
         # Connect signal
         self.polygon_drawn.connect(self.on_polygon_drawn)
-
-        self.refreshButton.clicked.connect(self._refresh_plugin_state)
 
         # Disable Run until polygon is drawn AND (paid JWT or active trial)
         self.runButton.setEnabled(False)
         self.runButton.setDefault(True)
 
-        # Non-blocking trial state fetch after UI is ready
+        self._show_page(_PAGE_LANDING)
+
+    @staticmethod
+    def _landing_workflow_icon(filename):
+        """Icon for a landing workflow button (Qt resource, else plugin folder PNG)."""
+        resource_path = f":/plugins/vec_plugin/icons/{filename}"
+        icon = QtGui.QIcon(resource_path)
+        if not icon.isNull():
+            return icon
+        file_path = os.path.join(
+            os.path.dirname(__file__), '..', 'resources', 'icons', filename
+        )
+        if os.path.isfile(file_path):
+            return QtGui.QIcon(file_path)
+        return QtGui.QIcon()
+
+    def _setup_page_navigation(self):
+        """Landing hub + workflow pages (stacked); footer actions only on landing."""
+        self._stack = QtWidgets.QStackedWidget()
+
+        # --- Landing ---
+        self._page_landing = QtWidgets.QWidget()
+        landing_layout = QtWidgets.QVBoxLayout(self._page_landing)
+        landing_layout.setContentsMargins(28, 28, 28, 20)
+        landing_layout.setSpacing(20)
+
+        title = QtWidgets.QLabel(self.tr("The FieldWatch Pack."))
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        landing_layout.addWidget(title)
+
+        welcome = QtWidgets.QLabel(self.tr("Hello, welcome."))
+        welcome.setStyleSheet("font-size: 14px;")
+        landing_layout.addWidget(welcome)
+
+        subtitle = QtWidgets.QLabel(
+            self.tr("How can we make your workflow better?")
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("font-size: 14px;")
+        landing_layout.addWidget(subtitle)
+        landing_layout.addSpacing(8)
+
+        self._btn_one_click = QtWidgets.QPushButton(self.tr("One-Click Segmentation"))
+        self._btn_large_area = QtWidgets.QPushButton(self.tr("Large Area Vectorization"))
+        self._btn_order_imagery = QtWidgets.QPushButton(self.tr("Order Drone Imagery"))
+        _landing_icons = (
+            (self._btn_one_click, "click.png"),
+            (self._btn_large_area, "map.png"),
+            (self._btn_order_imagery, "drone.png"),
+        )
+        for btn, icon_file in _landing_icons:
+            btn.setStyleSheet(_LANDING_ACTION_STYLE)
+            btn.setCursor(PointingHandCursor)
+            icon = self._landing_workflow_icon(icon_file)
+            if not icon.isNull():
+                btn.setIcon(icon)
+                btn.setIconSize(_LANDING_ICON_SIZE)
+                btn.setLayoutDirection(RightToLeft)
+            landing_layout.addWidget(btn)
+
+        self._landingGetLicenceButton = QtWidgets.QPushButton(self.tr("Get Licence"))
+        self._landingGetLicenceButton.setSizePolicy(self.getLicenseKeyButton.sizePolicy())
+        self._landingGetLicenceButton.setToolTip(
+            self.tr("Open FieldWatch in your browser to get a paid licence key.")
+        )
+        landing_layout.addWidget(self._landingGetLicenceButton)
+
+        landing_layout.addStretch()
+
+        landing_footer = QtWidgets.QHBoxLayout()
+        landing_footer.setSpacing(10)
+        self.howToUsePluginButton = QtWidgets.QPushButton(self.tr("How to use this plugin"))
+        self.sendFeedbackButton = QtWidgets.QPushButton(self.tr("Send feedback"))
+        landing_footer.addWidget(self.howToUsePluginButton)
+        landing_footer.addWidget(self.sendFeedbackButton)
+        landing_footer.addStretch()
+        landing_layout.addLayout(landing_footer)
+
+        self._landingGetLicenceButton.clicked.connect(self.open_fieldwatch_website)
+        self._btn_one_click.clicked.connect(self.one_click_requested.emit)
+        self._btn_large_area.clicked.connect(lambda: self._show_page(_PAGE_VECTORIZATION))
+        self._btn_order_imagery.clicked.connect(self.open_order_imagery_dialog)
+        self.howToUsePluginButton.clicked.connect(self.open_how_to_use_plugin_video)
+        self.sendFeedbackButton.clicked.connect(self.open_feedback_dialog)
+
+        # --- One-click placeholder ---
+        self._page_one_click = QtWidgets.QWidget()
+        one_click_layout = QtWidgets.QVBoxLayout(self._page_one_click)
+        one_click_layout.setContentsMargins(24, 24, 24, 16)
+        one_click_layout.setSpacing(12)
+
+        oc_title = QtWidgets.QLabel(self.tr("One-Click Segmentation"))
+        oc_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        one_click_layout.addWidget(oc_title)
+
+        oc_body = QtWidgets.QLabel(
+            self.tr(
+                "Trial runs are available automatically. Open map tools (or validate a paid licence if needed)."
+            )
+        )
+        oc_body.setWordWrap(True)
+        oc_body.setStyleSheet("color: palette(mid);")
+        one_click_layout.addWidget(oc_body)
+
+        self._openOneClickButton = QtWidgets.QPushButton(self.tr("Open segmentation"))
+        self._openOneClickButton.setStyleSheet(_LANDING_ACTION_STYLE)
+        self._openOneClickButton.setCursor(PointingHandCursor)
+        one_click_layout.addWidget(self._openOneClickButton)
+        one_click_layout.addStretch()
+
+        one_click_footer = QtWidgets.QHBoxLayout()
+        self.backFromOneClickButton = QtWidgets.QPushButton(self.tr("Back"))
+        one_click_footer.addWidget(self.backFromOneClickButton)
+        one_click_footer.addStretch()
+        one_click_layout.addLayout(one_click_footer)
+        self.backFromOneClickButton.clicked.connect(lambda: self._show_page(_PAGE_LANDING))
+        self._openOneClickButton.clicked.connect(self.one_click_requested.emit)
+
+        # --- Large area vectorization (existing form) ---
+        self._page_vectorization = QtWidgets.QWidget()
+        vec_layout = QtWidgets.QVBoxLayout(self._page_vectorization)
+        vec_layout.setContentsMargins(0, 0, 0, 0)
+        vec_layout.setSpacing(8)
+
+        self.licenseGroupBox.setParent(None)
+
+        for widget in (
+            self.inputGroupBox,
+            self.outputGroupBox,
+            self.progressBar,
+            self.statusLabel,
+        ):
+            widget.setParent(None)
+            vec_layout.addWidget(widget)
+
+        vec_footer = QtWidgets.QHBoxLayout()
+        self.backFromVectorizationButton = QtWidgets.QPushButton(self.tr("Back"))
+        self.refreshButton = QtWidgets.QPushButton(self.tr("Refresh"))
+        self.runButton = QtWidgets.QPushButton(self.tr("Run"))
+        self.cancelButton = QtWidgets.QPushButton(self.tr("Cancel"))
+        vec_footer.addWidget(self.backFromVectorizationButton)
+        vec_footer.addWidget(self.refreshButton)
+        vec_footer.addStretch()
+        vec_footer.addWidget(self.runButton)
+        vec_footer.addWidget(self.cancelButton)
+        vec_layout.addLayout(vec_footer)
+
+        self.backFromVectorizationButton.clicked.connect(lambda: self._show_page(_PAGE_LANDING))
+        self.refreshButton.clicked.connect(self._refresh_plugin_state)
+        self.runButton.clicked.connect(self.accept)
+        self.cancelButton.clicked.connect(self.reject)
+
+        self._stack.addWidget(self._page_landing)
+        self._stack.addWidget(self._page_one_click)
+        self._stack.addWidget(self._page_vectorization)
+
+        while self.verticalLayout.count():
+            self.verticalLayout.takeAt(0)
+        self.verticalLayout.addWidget(self._stack)
+
+        self.resize(500, 580)
+
+    def _place_license_panel(self, page_widget, insert_index=0):
+        """Shared licence + trial quota panel on workflow pages only."""
+        layout = page_widget.layout()
+        if layout is None:
+            return
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget() is self.licenseGroupBox:
+                layout.removeWidget(self.licenseGroupBox)
+                break
+        self.licenseGroupBox.setParent(None)
+        layout.insertWidget(insert_index, self.licenseGroupBox)
+        self.licenseGroupBox.show()
+
+    def _show_page(self, index):
+        self._stack.setCurrentIndex(index)
+        titles = {
+            _PAGE_LANDING: self.tr("The FieldWatch Pack."),
+            _PAGE_ONE_CLICK: self.tr("One-Click Segmentation"),
+            _PAGE_VECTORIZATION: self.tr("Large Area Vectorization"),
+        }
+        self.setWindowTitle(titles.get(index, self.tr("The FieldWatch Pack.")))
+        if index == _PAGE_VECTORIZATION:
+            self._place_license_panel(self._page_vectorization, insert_index=0)
+            self.populate_layers()
+            self._update_trial_quota_label()
+            self.resize(500, 620)
+        elif index == _PAGE_ONE_CLICK:
+            self.licenseGroupBox.hide()
+            self.resize(440, 320)
+        elif index == _PAGE_LANDING:
+            self.licenseGroupBox.hide()
+            self.resize(440, 360)
+        else:
+            self.resize(440, 280)
+
+    def showEvent(self, event):
+        """Show landing first; sync deferred trial usage and fetch quota."""
+        super(VecPluginDialog, self).showEvent(event)
+        self._show_page(_PAGE_LANDING)
+        self._trial_acc.sync_pending_usages()
+        self._sync_ui_from_trial_access()
         QtCore.QTimer.singleShot(0, self.refresh_trial_state)
-    
+
+    def _sync_ui_from_trial_access(self):
+        acc = self._trial_acc
+        self._install_key = acc.install_key
+        self._trial_id = acc.trial_id
+        self.trial_uses_total = acc.uses_total
+        self.trial_uses_remaining = acc.uses_remaining
+        self.trial_status = acc.trial_status
+        self.jwt_token = acc.jwt_token
+        self.license_key = acc.license_key
+        self.token_expiry = acc.token_expiry
+        if acc.license_key and hasattr(self, "licenseKeyLineEdit"):
+            if not self.licenseKeyLineEdit.text().strip():
+                self.licenseKeyLineEdit.setText(acc.license_key)
+        self._update_trial_quota_label()
+
+    def _push_ui_to_trial_access(self):
+        acc = self._trial_acc
+        acc.trial_id = self._trial_id
+        acc.uses_total = self.trial_uses_total
+        acc.uses_remaining = self.trial_uses_remaining
+        acc.trial_status = self.trial_status
+
+    def _set_trial_quota_loading(self, loading):
+        self._trial_quota_spinner.setVisible(bool(loading))
+        if loading:
+            self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
+            self.trialQuotaLabel.setStyleSheet("color: blue;")
+
     def populate_layers(self):
         """Populate the input layer combo box with available raster layers."""
         self.inputLayerCombo.clear()
@@ -246,56 +507,48 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         return self._trial_id
 
     def trial_can_run(self):
-        """True if trial mode can start a billable run (paid JWT takes precedence elsewhere)."""
+        """True if established trial can start a billable run (paid JWT elsewhere)."""
         if self.jwt_token:
             return False
-        return (
-            self.trial_status == "active"
-            and self.trial_uses_remaining is not None
-            and self.trial_uses_remaining > 0
-        )
+        return self._trial_acc.is_trial_unlocked()
 
     def _license_action_is_generate_trial(self):
-        """True when the single licence button should refresh/bootstrap trial (not open the shop)."""
-        if self.jwt_token:
-            return False
-        if self.trial_status == "exhausted":
-            return False
-        if self.trial_status == "revoked":
-            return False
-        rem = self.trial_uses_remaining
-        if rem is not None and rem <= 0:
-            return False
-        return True
+        """Trial is auto-bootstrapped; never expose a user "generate trial key" action."""
+        return False
 
     def _update_license_action_button(self):
-        """Morph label: Generate Trial Key while trial has runs; Get Licence once exhausted or paid."""
+        """Show "Get Licence" only after trial is exhausted/revoked (or paid validation is needed)."""
         if not hasattr(self, "getLicenseKeyButton"):
             return
-        if self._license_action_is_generate_trial():
-            self.getLicenseKeyButton.setText(self.tr("Generate Trial Key"))
-            self.getLicenseKeyButton.setToolTip(
-                self.tr(
-                    "Contact the server to activate or refresh your free trial runs. "
-                    "When your trial is used up, this becomes a link to get a paid licence."
-                )
-            )
-            locked = trial_helpers.is_trial_generate_locked_for_current_trial(self._trial_id)
-            self.getLicenseKeyButton.setEnabled(not locked)
-        else:
-            trial_helpers.clear_trial_generate_locked_trial_id()
-            self.getLicenseKeyButton.setText(self.tr("Get Licence"))
-            self.getLicenseKeyButton.setToolTip(
-                self.tr("Open FieldWatch in your browser to get a paid licence key.")
-            )
-            self.getLicenseKeyButton.setEnabled(True)
+        # Hide CTA while paid or while active trial is available.
+        if self.jwt_token or self.trial_can_run():
+            self.getLicenseKeyButton.setVisible(False)
+            return
+
+        # While state is unknown, keep CTA hidden (spinner/label will explain).
+        if self.trial_status is None and self.trial_uses_remaining is None:
+            self.getLicenseKeyButton.setVisible(False)
+            return
+
+        # Show CTA when the trial is clearly exhausted/revoked/zero.
+        trial_exhausted = (
+            self.trial_status in ("exhausted", "revoked")
+            or (self.trial_uses_remaining is not None and self.trial_uses_remaining <= 0)
+        )
+        if not trial_exhausted:
+            self.getLicenseKeyButton.setVisible(False)
+            return
+
+        self.getLicenseKeyButton.setVisible(True)
+        self.getLicenseKeyButton.setText(self.tr("Get Licence"))
+        self.getLicenseKeyButton.setToolTip(
+            self.tr("Open FieldWatch in your browser to get a paid licence key.")
+        )
+        self.getLicenseKeyButton.setEnabled(True)
 
     def _on_license_action_clicked(self):
-        if self._license_action_is_generate_trial():
-            # User-visible result: silent refresh looks like a no-op when quota is unchanged.
-            self.refresh_trial_state(show_error_dialog=True, show_success_dialog=True)
-        else:
-            self.open_fieldwatch_website()
+        # UX: only paid CTA is exposed after trial exhaustion.
+        self.open_fieldwatch_website()
 
     def _update_trial_quota_label(self):
         if self.jwt_token:
@@ -303,9 +556,16 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.tr("Using paid license — runs use your key, not trial quota.")
             )
             self.trialQuotaLabel.setStyleSheet("color: gray;")
-        elif self.trial_status is None and self.trial_uses_remaining is None:
+        elif not trial_helpers.is_trial_established():
             self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
             self.trialQuotaLabel.setStyleSheet("color: blue;")
+        elif self.trial_status is None and self.trial_uses_remaining is None:
+            if self._trial_quota_spinner.isVisible():
+                self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
+                self.trialQuotaLabel.setStyleSheet("color: blue;")
+            else:
+                self.trialQuotaLabel.setText("")
+                self.trialQuotaLabel.setStyleSheet("color: gray;")
         else:
             total = self.trial_uses_total
             rem = self.trial_uses_remaining
@@ -324,81 +584,144 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 self.trialQuotaLabel.setStyleSheet("color: green;")
             self.trialQuotaLabel.setText(txt)
+
+        # Trial-only UX: hide paid licence inputs while trial is active.
+        trial_exhausted = (
+            self.trial_status in ("exhausted", "revoked")
+            or (self.trial_uses_remaining is not None and self.trial_uses_remaining <= 0)
+        )
+        show_inputs = (not self.jwt_token) and trial_exhausted
+        if hasattr(self, "licenseKeyLineEdit"):
+            self.licenseKeyLineEdit.setVisible(show_inputs)
+        if hasattr(self, "validateLicenseButton"):
+            self.validateLicenseButton.setVisible(show_inputs)
         self._update_license_action_button()
 
     def refresh_trial_state(self, show_error_dialog=False, show_success_dialog=False):
-        """GET /qgis/trial/state — updates labels and persisted trial_id."""
-        try:
-            data = trial_helpers.fetch_trial_state(
-                INFERENCE_BASE_URL,
-                self._install_key,
-                trial_id=self._trial_id,
-                timeout=5,
+        """Refresh trial quota from the server in a background thread."""
+        self._trial_refresh_show_error_dialog = show_error_dialog
+        self._trial_refresh_show_success_dialog = show_success_dialog
+        if self._trial_state_worker is not None and self._trial_state_worker.isRunning():
+            return
+        if self._trial_generate_worker is not None and self._trial_generate_worker.isRunning():
+            return
+        self._set_trial_quota_loading(True)
+        # UX: if this is a first-time profile, auto bootstrap trial (no user clicks).
+        if not trial_helpers.is_trial_established():
+            self._trial_generate_worker = TrialGenerateWorker(self._install_key, parent=self)
+            self._trial_generate_worker.finished_ok.connect(self._on_trial_generated)
+            self._trial_generate_worker.failed.connect(self._on_trial_generate_failed)
+            self._trial_generate_worker.finished.connect(self._on_trial_generate_worker_finished)
+            self._trial_generate_worker.start()
+        else:
+            self._trial_state_worker = TrialStateFetchWorker(self._install_key, self._trial_id)
+            self._trial_state_worker.finished_ok.connect(self._on_trial_state_fetched)
+            self._trial_state_worker.failed.connect(self._on_trial_state_fetch_failed)
+            self._trial_state_worker.finished.connect(self._on_trial_state_worker_finished)
+            self._trial_state_worker.start()
+
+    def generate_trial_key(self, show_error_dialog=False, show_success_dialog=True):
+        """Request a new trial key from the server for this profile."""
+        self._trial_refresh_show_error_dialog = show_error_dialog
+        self._trial_refresh_show_success_dialog = show_success_dialog
+        if self._trial_generate_worker is not None and self._trial_generate_worker.isRunning():
+            return
+        if self._trial_state_worker is not None and self._trial_state_worker.isRunning():
+            return
+        self._set_trial_quota_loading(True)
+        self.getLicenseKeyButton.setEnabled(False)
+        self._trial_generate_worker = TrialGenerateWorker(self._install_key, parent=self)
+        self._trial_generate_worker.finished_ok.connect(self._on_trial_generated)
+        self._trial_generate_worker.failed.connect(self._on_trial_generate_failed)
+        self._trial_generate_worker.finished.connect(self._on_trial_generate_worker_finished)
+        self._trial_generate_worker.start()
+
+    def _on_trial_generate_worker_finished(self):
+        self._trial_generate_worker = None
+        self._update_license_action_button()
+
+    def _show_trial_generate_success(self, data: dict) -> None:
+        trial_helpers.mark_trial_established()
+        tid = trial_helpers.trial_id_from_response(data) or (self._trial_id or "")
+        if tid:
+            self.licenseKeyLineEdit.setText(tid)
+            QtWidgets.QApplication.clipboard().setText(tid)
+            trial_helpers.set_trial_generate_locked_trial_id(tid)
+            self.licenseStatusLabel.setText(self.tr("✓ Trial key generated"))
+            self.licenseStatusLabel.setStyleSheet("color: green;")
+        rem = data.get("uses_remaining")
+        tot = data.get("uses_total")
+        rem_s = str(rem) if rem is not None else "?"
+        tot_s = str(tot) if tot is not None else "?"
+        if tid:
+            body = self.tr(
+                "Your trial key:\n\n{0}\n\n"
+                "Runs remaining: {1} of {2}.\n\n"
+                "The key has been copied to the clipboard and filled in above."
+            ).format(tid, rem_s, tot_s)
+        else:
+            body = self.tr(
+                "Trial activated.\n\nRuns remaining: {0} of {1}."
+            ).format(rem_s, tot_s)
+        QtWidgets.QMessageBox.information(self, self.tr("Trial key"), body)
+
+    def _on_trial_generated(self, data):
+        self._set_trial_quota_loading(False)
+        self._trial_acc.apply_server_state(data)
+        self._sync_ui_from_trial_access()
+        self._sync_ok_button_state()
+        if trial_helpers.trial_id_from_response(data) and not trial_helpers.is_trial_established():
+            trial_helpers.mark_trial_established()
+        if self._trial_refresh_show_success_dialog:
+            self._show_trial_generate_success(data)
+
+    def _on_trial_generate_failed(self, err_text):
+        self._set_trial_quota_loading(False)
+        self.trialQuotaLabel.setText(self.tr("Could not generate trial key."))
+        self.trialQuotaLabel.setStyleSheet("color: red;")
+        if self._trial_refresh_show_error_dialog:
+            QtWidgets.QMessageBox.warning(
+                self, self.tr("Trial key"), err_text[:2000]
             )
-            tid = data.get("trial_id")
-            if tid:
-                self._trial_id = tid
-                trial_helpers.set_stored_trial_id(tid)
-            self.trial_uses_total = data.get("uses_total")
-            self.trial_uses_remaining = data.get("uses_remaining")
-            self.trial_status = data.get("trial_state")
-            self._update_trial_quota_label()
-            self._sync_ok_button_state()
-            if show_success_dialog:
-                tid_str = (tid or self._trial_id or "").strip()
-                if tid_str:
-                    QtWidgets.QApplication.clipboard().setText(tid_str)
-                    clip_note = self.tr(
-                        "Your server trial id has been copied to the clipboard "
-                        "(for support or your records).\n\n"
-                    )
-                else:
-                    clip_note = ""
-                rem = data.get("uses_remaining")
-                tot = data.get("uses_total")
-                rem_s = str(rem) if rem is not None else "?"
-                tot_s = str(tot) if tot is not None else "?"
-                if show_success_dialog and tid_str:
-                    trial_helpers.set_trial_generate_locked_trial_id(tid_str)
-                QtWidgets.QMessageBox.information(
-                    self,
-                    self.tr("Trial key"),
-                    clip_note
-                    + self.tr("Trial status refreshed from the server.\n\nRuns remaining: {0} of {1}.").format(
-                        rem_s, tot_s
-                    )
-                    + self.tr(
-                        "\n\nTo confirm this trial id here, paste it into the License key field "
-                        "and press Validate."
-                    ),
-                )
-                self._update_license_action_button()
-        except Exception as e:
-            self.trial_status = None
-            self.trialQuotaLabel.setText(
-                self.tr("Could not load trial status ({0}). You can still validate a paid license.").format(str(e)[:120])
+        self._update_license_action_button()
+
+    def _on_trial_state_worker_finished(self):
+        self._trial_state_worker = None
+
+    def _on_trial_state_fetched(self, data):
+        self._set_trial_quota_loading(False)
+        self._trial_acc.apply_server_state(data)
+        self._sync_ui_from_trial_access()
+        self._sync_ok_button_state()
+        if trial_helpers.trial_id_from_response(data) and not trial_helpers.is_trial_established():
+            trial_helpers.mark_trial_established()
+
+    def _on_trial_state_fetch_failed(self, _err_text):
+        self._set_trial_quota_loading(False)
+        show_error_dialog = self._trial_refresh_show_error_dialog
+        self.trial_status = None
+        _trial_err_msg = self.tr(
+            "Could not load trial status. you can still validate a paid license."
+        )
+        self.trialQuotaLabel.setText(_trial_err_msg)
+        self.trialQuotaLabel.setStyleSheet("color: orange;")
+        QgsMessageLog.logMessage(
+            f"Trial state refresh: {_err_text}",
+            "VEC Plugin",
+            Qgis.Warning,
+        )
+        if show_error_dialog:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("Trial status"),
+                _trial_err_msg,
             )
-            self.trialQuotaLabel.setStyleSheet("color: orange;")
-            QgsMessageLog.logMessage(
-                f"Trial state refresh: {str(e)}",
-                "VEC Plugin",
-                Qgis.Warning,
-            )
-            if show_error_dialog:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    self.tr("Trial status"),
-                    str(e)[:500],
-                )
-            self._update_license_action_button()
+        self._update_license_action_button()
 
     def apply_trial_usage_response(self, data):
-        """Update UI after POST /qgis/trial/usage (allowed path)."""
-        if data.get("uses_remaining") is not None:
-            self.trial_uses_remaining = data["uses_remaining"]
-            if self.trial_uses_remaining <= 0:
-                self.trial_status = "exhausted"
-        self._update_trial_quota_label()
+        """Update UI after a successful trial usage debit (allowed path)."""
+        self._trial_acc.apply_server_state(data)
+        self._sync_ui_from_trial_access()
         self._sync_ok_button_state()
 
     def _sync_ok_button_state(self):
@@ -409,19 +732,19 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def apply_trial_usage_denied(self, data):
         """Update UI after usage denied."""
-        if data.get("uses_remaining") is not None:
-            self.trial_uses_remaining = data["uses_remaining"]
-        if data.get("trial_state"):
-            self.trial_status = data["trial_state"]
-        self._update_trial_quota_label()
+        self._trial_acc.apply_server_state(data)
+        self._sync_ui_from_trial_access()
         self._sync_ok_button_state()
 
     def get_trial_billable_idempotency_key(self):
-        """Key for POST /qgis/trial/usage for the current OK click (max 128 chars)."""
-        return self._trial_billable_idempotency_key
+        """Stable idempotency key for the current billable run (max 128 chars)."""
+        key = self._trial_acc.get_billable_idempotency_key()
+        self._trial_billable_idempotency_key = key
+        return key
 
     def clear_trial_billable_idempotency_key(self):
-        """Clear after POST /qgis/trial/usage completes (HTTP response received)."""
+        """Clear after trial usage debit completes (HTTP response received)."""
+        self._trial_acc.clear_billable_idempotency_key()
         self._trial_billable_idempotency_key = None
 
     def open_order_imagery_dialog(self):
@@ -451,15 +774,14 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             return False
 
     def _validate_pasted_trial_id(self, license_key):
-        """Validate pasted server trial id via GET /qgis/trial/state (not paid /auth/validate)."""
+        """Validate a pasted trial UUID against the server (not paid licence validation)."""
         self.validateLicenseButton.setEnabled(False)
         self.validateLicenseButton.setText(self.tr("Validating…"))
         self.licenseStatusLabel.setText(self.tr("Validating trial key…"))
         self.licenseStatusLabel.setStyleSheet("color: blue;")
 
         old_tid = self._trial_id
-        self.jwt_token = None
-        self.license_key = None
+        self._trial_acc.clear_paid_license()
 
         try:
             tid = str(uuid.UUID(license_key.strip()))
@@ -471,17 +793,12 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 trial_id=tid,
                 timeout=10,
             )
-            tid_r = data.get("trial_id")
-            if tid_r:
-                self._trial_id = tid_r
-                trial_helpers.set_stored_trial_id(tid_r)
-            self.trial_uses_total = data.get("uses_total")
-            self.trial_uses_remaining = data.get("uses_remaining")
-            self.trial_status = data.get("trial_state")
-            self._update_trial_quota_label()
+            self._trial_acc.apply_server_state(data)
+            self._sync_ui_from_trial_access()
             self._sync_ok_button_state()
 
             if self.trial_can_run():
+                trial_helpers.mark_trial_established()
                 self.licenseStatusLabel.setText(self.tr("✓ Trial key valid"))
                 self.licenseStatusLabel.setStyleSheet("color: green;")
             elif self.trial_status == "exhausted" or (
@@ -545,14 +862,13 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Call validation endpoint
         try:
-            from .vec_inference_client import VecInferenceClient
+            from ..core.vec_inference_client import VecInferenceClient
             temp_client = VecInferenceClient(INFERENCE_BASE_URL)
             token, expiry = temp_client.validate_license_key(license_key)
             
             if token:
-                self.jwt_token = token
-                self.token_expiry = expiry
-                self.license_key = license_key
+                self._trial_acc.set_paid_license(token, license_key, expiry)
+                self._sync_ui_from_trial_access()
                 self.clear_trial_billable_idempotency_key()
                 self.licenseStatusLabel.setText("✓ Valid")
                 self.licenseStatusLabel.setStyleSheet("color: green;")
@@ -561,9 +877,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 # Enable OK button if polygon is drawn
                 self._sync_ok_button_state()
             else:
-                self.jwt_token = None
-                self.token_expiry = None
-                self.license_key = None
+                self._trial_acc.clear_paid_license()
+                self._sync_ui_from_trial_access()
                 self.licenseStatusLabel.setText("✗ Invalid")
                 self.licenseStatusLabel.setStyleSheet("color: red;")
                 self._update_trial_quota_label()
@@ -574,9 +889,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                     "The license key is invalid or expired."
                 )
         except Exception as e:
-            self.jwt_token = None
-            self.token_expiry = None
-            self.license_key = None
+            self._trial_acc.clear_paid_license()
+            self._sync_ui_from_trial_access()
             self.licenseStatusLabel.setText("✗ Error")
             self.licenseStatusLabel.setStyleSheet("color: red;")
             self._update_trial_quota_label()
@@ -605,7 +919,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             install_key=self._install_key,
             trial_id=self._trial_id,
         )
-        dlg.exec_()
+        dialog_exec(dlg)
 
     def start_polygon_drawing(self):
         """Start polygon drawing on the map canvas."""
@@ -695,8 +1009,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 self,
                 self.tr("License or trial required"),
                 self.tr(
-                    "Validate a paid license key, or wait until trial status shows remaining runs, "
-                    "then try again."
+                    "Validate a paid licence key. Trial quota loads automatically on open."
                 ),
             )
             return
@@ -709,10 +1022,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             return
 
-        # Trial billable attempt: one idempotency_key per OK click (checklist §5); reused if POST must retry.
         if not self.jwt_token and self.trial_can_run():
-            if not self._trial_billable_idempotency_key:
-                self._trial_billable_idempotency_key = str(uuid.uuid4())[:128]
+            self.get_trial_billable_idempotency_key()
 
         # Emit signal to start processing (dialog stays open)
         self.processing_started.emit()
@@ -780,3 +1091,5 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         QtCore.QTimer.singleShot(0, self.refresh_trial_state)
 
         self.clear_trial_billable_idempotency_key()
+
+        self._show_page(_PAGE_LANDING)

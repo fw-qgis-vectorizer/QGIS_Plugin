@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/plugins/vec_plugin" >
+        <file>icons/binocular.png</file>
+        <file>icons/click.png</file>
+        <file>icons/map.png</file>
+        <file>icons/drone.png</file>
+    </qresource>
+</RCC>

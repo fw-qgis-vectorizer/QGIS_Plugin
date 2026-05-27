@@ -10,7 +10,7 @@
    </rect>
   </property>
   <property name="windowTitle" >
-   <string>FieldWatch - Vectorization</string>
+   <string>FieldWatch Vectorizer</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -31,7 +31,7 @@
         <item>
          <widget class="QLineEdit" name="licenseKeyLineEdit">
           <property name="placeholderText">
-           <string>Paid license key or trial UUID</string>
+           <string>Input license or trial key</string>
           </property>
          </widget>
         </item>
@@ -55,7 +55,7 @@
            </sizepolicy>
           </property>
           <property name="text">
-           <string>Generate Trial Key</string>
+           <string>Get Licence</string>
           </property>
          </widget>
         </item>
@@ -179,18 +179,11 @@
       <item row="0" column="1">
        <widget class="QLineEdit" name="outputLayerLineEdit">
         <property name="placeholderText">
-         <string>Building_Detections</string>
+         <string>Building Detections</string>
         </property>
        </widget>
       </item>
      </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QPushButton" name="orderImageryButton">
-     <property name="text">
-      <string>Order Drone Imagery</string>
-     </property>
     </widget>
    </item>
    <item>
@@ -216,82 +209,8 @@
    </property>
     </widget>
    </item>
-   <item>
-    <layout class="QHBoxLayout" name="dialogFooterLayout">
-     <item>
-      <widget class="QPushButton" name="refreshButton">
-       <property name="text">
-        <string>Refresh</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="howToUsePluginButton">
-       <property name="sizePolicy" >
-        <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="text">
-        <string>How to use this plugin</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="sendFeedbackButton">
-       <property name="text">
-        <string>Send feedback</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <spacer name="dialogFooterSpacer">
-       <property name="orientation">
-        <enum>Qt::Horizontal</enum>
-       </property>
-       <property name="sizeType">
-        <enum>QSizePolicy::Expanding</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>40</width>
-         <height>1</height>
-        </size>
-       </property>
-      </spacer>
-     </item>
-     <item>
-      <widget class="QPushButton" name="runButton">
-       <property name="text">
-        <string>Run</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="cancelButton">
-       <property name="text">
-        <string>Cancel</string>
-       </property>
-      </widget>
-     </item>
-    </layout>
-   </item>
   </layout>
  </widget>
  <resources/>
- <connections>
-  <connection>
-   <sender>runButton</sender>
-   <signal>clicked()</signal>
-   <receiver>VecPluginDialogBase</receiver>
-   <slot>accept()</slot>
-  </connection>
-  <connection>
-   <sender>cancelButton</sender>
-   <signal>clicked()</signal>
-   <receiver>VecPluginDialogBase</receiver>
-   <slot>reject()</slot>
-  </connection>
- </connections>
+ <connections/>
 </ui>

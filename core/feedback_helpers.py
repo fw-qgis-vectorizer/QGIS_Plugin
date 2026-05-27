@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""POST /qgis/feedback — server sets submitted_at; client never sends a clock field."""
+"""Submit user feedback to FieldWatch (server sets submitted_at)."""
 
 from __future__ import annotations
 
@@ -19,17 +19,8 @@ def post_feedback(
     trial_id=None,
     timeout=25,
 ):
-    """
-    POST /qgis/feedback.
-
-    Body: ``message`` (required, max 1500 chars). Optional: ``install_key``, ``trial_id``,
-    ``plugin_version``, ``qgis_version``. Do not send submitted_at.
-
-    :returns: Parsed 201 JSON (e.g. id, submitted_at, ok).
-    :raises: Exception on network or non-success HTTP.
-    """
-    base = inference_base_url.rstrip("/")
-    url = ApiRoutes.qgis_feedback(base)
+    """Send feedback JSON to the inference service."""
+    url = ApiRoutes.qgis_feedback(inference_base_url)
     text = (message or "").strip()
     if not text:
         raise ValueError("Feedback message is empty.")

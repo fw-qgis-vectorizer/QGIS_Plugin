@@ -28,14 +28,16 @@ from qgis.core import (
     QgsDistanceArea, Qgis
 )
 
-# Initialize Qt resources from file resources.py
+# Initialize Qt resources (resources/resources.py via resources package)
 from .resources import *
-# Import the code for the dialog
-from .vec_plugin_dialog import VecPluginDialog
-from .order_imagery_dialog import OrderImageryDialog
-from .vec_inference_client import VecInferenceClient
-from .api_config import INFERENCE_BASE_URL, UPLOAD_BASE_URL
-from . import trial_helpers
+from .dialogs.vec_plugin_dialog import VecPluginDialog
+from .dialogs.order_imagery_dialog import OrderImageryDialog
+from .dialogs.one_click_settings_dialog import OneClickSettingsDialog
+from .core.one_click_controller import OneClickSegmentationController
+from .core.vec_inference_client import VecInferenceClient
+from .core.api_config import INFERENCE_BASE_URL, UPLOAD_BASE_URL
+from .core.qt_compat import dialog_exec
+from .core import trial_helpers
 import os.path
 import tempfile
 import uuid
@@ -71,7 +73,7 @@ class InferenceWorker(QThread):
             
             self.finished.emit(result_payload)
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(f"{type(e).__name__}: {str(e)}")
 
 
 class VecPlugin:
@@ -108,6 +110,11 @@ class VecPlugin:
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
         self.first_start = None
+        self.one_click_dlg = None
+        self.one_click_controller = None
+        self._segmentation_predictor = None
+        self._segmentation_preload_worker = None
+        self._segmentation_preloading = False
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -202,7 +209,7 @@ class VecPlugin:
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
 
-        icon_path = ':/plugins/vec_plugin/binocular.png'
+        icon_path = ':/plugins/vec_plugin/icons/binocular.png'
         self.add_action(
             icon_path,
             text=self.tr(u'FieldWatch'),
@@ -222,6 +229,18 @@ class VecPlugin:
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
+        if self.one_click_controller:
+            self.one_click_controller.shutdown()
+        self.one_click_dlg = None
+        self.one_click_controller = None
+        if self._segmentation_predictor is not None:
+            try:
+                self._segmentation_predictor.cleanup()
+            except Exception:
+                pass
+            self._segmentation_predictor = None
+        self._segmentation_preload_worker = None
+        self._segmentation_preloading = False
         for action in self.actions:
             self.iface.removePluginMenu(
                 self.tr(u'&FieldWatch Vectorizer'),
@@ -237,11 +256,17 @@ class VecPlugin:
         if self.first_start == True:
             self.first_start = False
             self.dlg = VecPluginDialog(iface=self.iface)
+            try:
+                self.dlg.one_click_requested.disconnect()
+            except Exception:
+                pass
+            self.dlg.one_click_requested.connect(self.run_one_click_segmentation)
+
+        QTimer.singleShot(0, self._preload_segmentation_model)
 
         # Populate layers in case new layers were added
         self.dlg.populate_layers()
-        QTimer.singleShot(0, self.dlg.refresh_trial_state)
-        
+
         # Reset processing flag
         self._is_processing = False
         
@@ -255,7 +280,7 @@ class VecPlugin:
         # show the dialog (non-modal so it stays open during processing)
         self.dlg.show()
         # Run the dialog event loop
-        self.dlg.exec_()
+        dialog_exec(self.dlg)
 
     def run_order_imagery(self):
         """Open the Order drone imagery dialog."""
@@ -264,6 +289,82 @@ class VecPlugin:
         self.order_imagery_dlg.show()
         self.order_imagery_dlg.raise_()
         self.order_imagery_dlg.activateWindow()
+
+    def _preload_segmentation_model(self):
+        """Load segmentation model when the main plugin opens (background)."""
+        if self._segmentation_predictor is not None:
+            return
+        if self._segmentation_preloading:
+            return
+        try:
+            from .core.model_venv import deps_installed
+            from .core.model_config import checkpoint_exists, resolve_checkpoint_path
+            from .core.model_predictor import build_model_predictor_config
+            from .core.one_click_workers import ModelInitWorker
+        except Exception:
+            return
+
+        if not deps_installed() or not checkpoint_exists():
+            return
+
+        try:
+            config = build_model_predictor_config(resolve_checkpoint_path())
+        except Exception:
+            return
+
+        self._segmentation_preloading = True
+        self._segmentation_preload_worker = ModelInitWorker(config)
+        self._segmentation_preload_worker.finished.connect(
+            self._on_segmentation_preload_finished
+        )
+        self._segmentation_preload_worker.error.connect(self._on_segmentation_preload_error)
+        self._segmentation_preload_worker.start()
+        self.iface.messageBar().pushMessage(
+            "FieldWatch",
+            self.tr("First startup can take about a minute (background)…"),
+            level=Qgis.MessageLevel.Info,
+            duration=5,
+        )
+
+    def _on_segmentation_preload_finished(self, predictor, _msg: str):
+        self._segmentation_preloading = False
+        self._segmentation_predictor = predictor
+        if self.one_click_controller is not None:
+            self.one_click_controller.apply_shared_predictor(predictor)
+            self.one_click_controller.refresh_status()
+        QgsMessageLog.logMessage(
+            "Segmentation ready (background startup complete).",
+            "FieldWatch One-Click",
+            Qgis.MessageLevel.Info,
+        )
+
+    def _on_segmentation_preload_error(self, message: str):
+        self._segmentation_preloading = False
+        QgsMessageLog.logMessage(
+            f"Segmentation preload failed: {message}",
+            "FieldWatch One-Click",
+            Qgis.MessageLevel.Warning,
+        )
+
+    def run_one_click_segmentation(self):
+        """Open the one-click segmentation settings window."""
+        if self.one_click_dlg is None:
+            self.one_click_dlg = OneClickSettingsDialog(
+                self.iface, pack_dialog=self.dlg
+            )
+            self.one_click_controller = OneClickSegmentationController(
+                self.iface, self.one_click_dlg, plugin=self
+            )
+            self.one_click_dlg.set_controller(self.one_click_controller)
+            self.one_click_controller.apply_shared_predictor(self._segmentation_predictor)
+        else:
+            self.one_click_controller.apply_shared_predictor(self._segmentation_predictor)
+            self.one_click_dlg.refresh_ui_local()
+        if self._segmentation_predictor is None and not self._segmentation_preloading:
+            QTimer.singleShot(0, self._preload_segmentation_model)
+        self.one_click_dlg.show()
+        self.one_click_dlg.raise_()
+        self.one_click_dlg.activateWindow()
     
     def _start_processing(self):
         """Start the inference processing."""
@@ -344,73 +445,31 @@ class VecPlugin:
                     license_key=license_key,
                 )
             else:
-                # Trial: consume immediately before billable pipeline; QGIS routes use X-Trial-* only (no Bearer).
-                self.dlg.refresh_trial_state()
-                if not self.dlg.get_trial_id():
-                    self.iface.messageBar().pushMessage(
-                        "Error",
-                        "Trial is not available (no trial id). Check your network and try again, or validate a paid license.",
-                        level=1,
-                        duration=8,
-                    )
-                    self._is_processing = False
-                    return
-                if not self.dlg.trial_can_run():
-                    self.iface.messageBar().pushMessage(
-                        "Error",
-                        "No trial runs remaining. Register for a license key at usefieldwatch.com.",
-                        level=1,
-                        duration=8,
-                    )
-                    self._is_processing = False
-                    return
+                from .core.trial_access import shared as trial_shared
 
-                idempotency_key = self.dlg.get_trial_billable_idempotency_key()
-                if not idempotency_key:
-                    idempotency_key = str(uuid.uuid4())[:128]
+                acc = trial_shared()
+                acc.sync_pending_usages()
+                if not self.dlg.get_trial_billable_idempotency_key():
+                    acc.get_billable_idempotency_key()
 
-                try:
-                    usage, clear_trial_idempotency = trial_helpers.post_trial_usage(
-                        INFERENCE_BASE_URL,
-                        self.dlg.get_trial_id(),
-                        self.dlg.get_install_key(),
-                        idempotency_key,
-                        timeout=45,
-                    )
-                except Exception as e:
+                ok, msg, usage, trial_receipt = acc.consume_for_large_area_infer()
+                if not ok:
+                    if usage:
+                        self.dlg.apply_trial_usage_denied(usage)
                     self.iface.messageBar().pushMessage(
                         "Error",
-                        str(e)[:300],
-                        level=2,
+                        (msg or "Trial usage failed.")[:300],
+                        level=1,
                         duration=10,
                     )
                     self._is_processing = False
                     return
 
-                if clear_trial_idempotency:
-                    self.dlg.clear_trial_billable_idempotency_key()
+                self.dlg.clear_trial_billable_idempotency_key()
+                self.dlg.apply_trial_usage_response(usage or {})
 
-                if not usage.get("allowed", False):
-                    self.dlg.apply_trial_usage_denied(usage)
-                    msg = usage.get("message") or usage.get("error_code") or "Trial usage was denied."
-                    self.iface.messageBar().pushMessage("Error", str(msg)[:300], level=1, duration=10)
-                    self._is_processing = False
-                    return
-
-                trial_receipt = usage.get("receipt")
-                if not trial_receipt:
-                    self.iface.messageBar().pushMessage(
-                        "Error",
-                        "Trial usage succeeded but server did not return a receipt. Cannot start inference.",
-                        level=2,
-                        duration=10,
-                    )
-                    self._is_processing = False
-                    return
-
-                trial_install_key = self.dlg.get_install_key()
-                trial_server_id = self.dlg.get_trial_id()
-                self.dlg.apply_trial_usage_response(usage)
+                trial_install_key = acc.install_key
+                trial_server_id = acc.trial_id
 
                 client = VecInferenceClient(
                     INFERENCE_BASE_URL,
@@ -599,8 +658,6 @@ class VecPlugin:
                 level=2,  # Critical
                 duration=10
             )
-            
-            # Re-enable buttons
             self.dlg.runButton.setEnabled(True)
             self.dlg.cancelButton.setEnabled(True)
             

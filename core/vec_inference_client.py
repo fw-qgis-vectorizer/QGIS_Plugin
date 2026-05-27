@@ -26,6 +26,7 @@ import time
 import zipfile
 import re
 import logging
+import traceback
 from urllib.parse import urljoin
 from qgis import processing
 from qgis.core import (
@@ -55,13 +56,15 @@ class VecInferenceClient:
     """Client for communicating with VEC inference service."""
   
     @staticmethod
-    def _sanitize_urls(text):
+    def _sanitize_urls(text, collapse_whitespace=True):
         """
         Remove URLs from text to prevent exposing internal endpoints in logs.
         Handles HTTP/HTTPS URLs, storage URLs (GCS, S3, Azure), and file paths.
       
         :param text: Text that may contain URLs
         :type text: str
+        :param collapse_whitespace: If True, collapse runs of whitespace (single-line friendly).
+        :type collapse_whitespace: bool
         :returns: Text with URLs removed
         :rtype: str
         """
@@ -72,18 +75,38 @@ class VecInferenceClient:
       
         # Pattern to match HTTP/HTTPS URLs
         http_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-        text_str = re.sub(http_pattern, '', text_str)
+        text_str = re.sub(http_pattern, '[REDACTED]', text_str)
       
         # Pattern to match storage URLs (gs://, s3://, azure://, etc.)
         storage_pattern = r'(gs|s3|azure|gcs)://[^\s<>"{}|\\^`\[\]]+'
-        text_str = re.sub(storage_pattern, '', text_str, flags=re.IGNORECASE)
+        text_str = re.sub(storage_pattern, '[REDACTED]', text_str, flags=re.IGNORECASE)
       
-        # Clean up extra spaces and colons left behind
-        text_str = re.sub(r'\s+', ' ', text_str)  # Multiple spaces to single space
-        text_str = re.sub(r'\s*:\s*', ': ', text_str)  # Clean up colons
+        if collapse_whitespace:
+            # Clean up extra spaces and colons left behind
+            text_str = re.sub(r'\s+', ' ', text_str)  # Multiple spaces to single space
+            text_str = re.sub(r'\s*:\s*', ': ', text_str)  # Clean up colons
         text_str = text_str.strip()
       
         return text_str
+
+    @staticmethod
+    def _log_raster_pipeline_failure(exc, context=""):
+        """
+        Log raster pipeline failures clearly: one Critical line (type + message),
+        then Warning with full traceback (URLs/storage paths sanitized).
+        """
+        exc_type = type(exc).__name__
+        msg = (str(exc) or "").strip() or repr(exc)
+        summary = VecInferenceClient._sanitize_urls(f"{exc_type}: {msg}")
+        if len(summary) > 800:
+            summary = summary[:797] + "..."
+        label = "Raster pipeline"
+        if context:
+            label = f"Raster pipeline ({context})"
+        QgsMessageLog.logMessage(f"{label}: {summary}", "VEC Plugin", Qgis.Critical)
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        tb_sanitized = VecInferenceClient._sanitize_urls(tb, collapse_whitespace=False)
+        QgsMessageLog.logMessage(f"{label} — full traceback:\n{tb_sanitized}", "VEC Plugin", Qgis.Warning)
   
     def __init__(
         self,
@@ -101,7 +124,7 @@ class VecInferenceClient:
         Paid mode: pass ``jwt_token`` (from ``/auth/validate``). Do not pass trial fields.
 
         Trial mode: omit ``jwt_token``. Pass ``trial_receipt``, ``trial_install_key``, and
-        ``trial_server_id`` (server ``trial_id``) after a successful ``POST /qgis/trial/usage``.
+        ``trial_server_id`` (server ``trial_id``) after a successful trial usage debit.
         QGIS routes then use ``X-Trial-*`` headers only (no ``Authorization``), per API spec.
         """
         self.service_url = service_url.rstrip('/')
@@ -423,11 +446,7 @@ class VecInferenceClient:
                     os.remove(temp_file)
           
         except Exception as e:
-            QgsMessageLog.logMessage(
-                f"Error processing raster: {self._sanitize_urls(str(e))}",
-                "VEC Plugin",
-                Qgis.Critical
-            )
+            VecInferenceClient._log_raster_pipeline_failure(e, "process_raster_layer")
             raise
   
     def _ensure_gdal_environment(self):
@@ -775,7 +794,6 @@ class VecInferenceClient:
                     f"Make sure your polygon intersects the raster layer."
                 )
                 logger.error(error_msg)
-                QgsMessageLog.logMessage(error_msg, "VEC Plugin", Qgis.Critical)
                 raise Exception(error_msg)
 
             # Add all features at once
@@ -870,11 +888,6 @@ class VecInferenceClient:
 
         except Exception as e:
             logger.critical(f"Raster cropping failed: {e}")
-            QgsMessageLog.logMessage(
-                f"Raster cropping error details: {str(e)}",
-                "VEC Plugin",
-                Qgis.Critical
-            )
             raise Exception(f"Raster cropping failed: {e}. Cannot proceed with original raster.") from e
 
 

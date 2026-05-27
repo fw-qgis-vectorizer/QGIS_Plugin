@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Modal feedback dialog: large text area, 1500 char cap, POST /qgis/feedback."""
+"""Modal feedback dialog: large text area, 1500 char cap, submits to FieldWatch API."""
 
 from qgis.PyQt import QtWidgets
 from qgis.core import QgsMessageLog, Qgis
 
-from .api_config import INFERENCE_BASE_URL
-from . import feedback_helpers
+from ..core.api_config import INFERENCE_BASE_URL
+from ..core import feedback_helpers
 
 
 class FeedbackDialog(QtWidgets.QDialog):

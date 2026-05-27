@@ -16,7 +16,7 @@ import unittest
 
 from qgis.PyQt.QtWidgets import QDialog
 
-from vec_plugin_dialog import VecPluginDialog
+from dialogs.vec_plugin_dialog import VecPluginDialog
 
 from utilities import get_qgis_app
 QGIS_APP = get_qgis_app()
