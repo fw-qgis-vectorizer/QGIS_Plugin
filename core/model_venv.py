@@ -9,7 +9,6 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import tempfile
-import urllib.request
 from typing import Callable
 
 from qgis.core import Qgis, QgsMessageLog
@@ -30,6 +29,7 @@ from .one_click_python import (
     standalone_python_exists,
     verify_standalone_python,
 )
+from .safe_http import GET_PIP_DOWNLOAD_HOSTS, download_https_to_file
 from .subprocess_utils import get_clean_env, popen_hidden, run_hidden
 
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
@@ -254,7 +254,12 @@ def _bootstrap_pip(venv_py: str, base_py: str) -> tuple[bool, str]:
     try:
         with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as tmp:
             get_pip_path = tmp.name
-        urllib.request.urlretrieve(GET_PIP_URL, get_pip_path)
+        download_https_to_file(
+            GET_PIP_URL,
+            get_pip_path,
+            GET_PIP_DOWNLOAD_HOSTS,
+            timeout=300,
+        )
         result = run_hidden(
             [venv_py, get_pip_path],
             capture_output=True,

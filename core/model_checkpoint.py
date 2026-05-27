@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
+import http.client
 import os
 import time
-import urllib.error
-import urllib.request
 from typing import Callable
 
 from qgis.core import Qgis, QgsMessageLog
@@ -18,6 +17,11 @@ from .model_config import (
     sam2_checkpoint_url,
 )
 from .one_click_log import sanitize_log_line
+from .safe_http import (
+    CHECKPOINT_DOWNLOAD_HOSTS,
+    HttpsDownloadResponse,
+    UnsafeDownloadURLError,
+)
 
 _CHUNK_BYTES = 1024 * 1024
 _MIN_CHECKPOINT_BYTES = 1_000_000
@@ -39,10 +43,22 @@ def _http_download_stream(
     if resume_offset > 0:
         headers["Range"] = f"bytes={resume_offset}-"
 
-    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            status = getattr(response, "status", response.getcode())
+        with HttpsDownloadResponse(
+            url,
+            CHECKPOINT_DOWNLOAD_HOSTS,
+            headers=headers,
+            timeout=120,
+        ) as response:
+            status = response.status
+            if status == 416 and resume_offset > 0:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                return False, "resume_reset"
+            if status >= 400:
+                return False, f"HTTP {status}"
             if resume_offset > 0 and status == 200:
                 # Server ignored Range; restart from scratch.
                 resume_offset = 0
@@ -80,17 +96,9 @@ def _http_download_stream(
                                 50,
                                 f"Downloading: {downloaded / (1024 * 1024):.1f} MB",
                             )
-    except urllib.error.HTTPError as exc:
-        if exc.code == 416 and resume_offset > 0:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-            return False, "resume_reset"
-        return False, f"HTTP {exc.code}: {exc.reason}"
-    except urllib.error.URLError as exc:
-        return False, str(exc.reason if exc.reason else exc)
-    except OSError as exc:
+    except http.client.HTTPException as exc:
+        return False, str(exc)
+    except (OSError, TimeoutError, UnsafeDownloadURLError) as exc:
         return False, str(exc)
 
     try:
