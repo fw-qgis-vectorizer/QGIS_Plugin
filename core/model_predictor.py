@@ -12,9 +12,8 @@ import threading
 import time
 
 import numpy as np
-from qgis.core import Qgis, QgsMessageLog
 
-from .model_config import LOG_CHANNEL, resolve_checkpoint_path, worker_script_basename
+from .model_config import resolve_checkpoint_path, worker_script_basename
 from .one_click_log import sanitize_log_line
 from .model_venv import get_venv_python, venv_exists
 from .subprocess_utils import get_clean_env, popen_hidden
@@ -56,6 +55,7 @@ class ModelPredictor:
         self.checkpoint = config["checkpoint"]
         self.process = None
         self._cleanup_lock = threading.Lock()
+        self._op_lock = threading.RLock()
         self._stderr_stop = threading.Event()
         self._stderr_thread: threading.Thread | None = None
         self.is_image_set = False
@@ -103,12 +103,11 @@ class ModelPredictor:
             try:
                 return json.loads(stripped)
             except json.JSONDecodeError:
-                QgsMessageLog.logMessage(
+                # Runs on worker QThreads — QgsMessageLog is not thread-safe here.
+                _worker_stderr_log.info(
                     sanitize_log_line(
                         f"Model worker non-JSON stdout (ignored): {stripped[:200]}"
-                    ),
-                    LOG_CHANNEL,
-                    level=Qgis.MessageLevel.Warning,
+                    )
                 )
 
     def _write_stdin_line(self, line: str, timeout: int = 120) -> None:
@@ -206,18 +205,19 @@ class ModelPredictor:
                 raise RuntimeError(f"Unexpected init response: {data}")
 
     def set_image(self, image: np.ndarray):
-        self.start()
-        payload = {
-            "action": "set_image",
-            "image": base64.b64encode(image.tobytes()).decode("utf-8"),
-            "image_shape": list(image.shape),
-            "image_dtype": str(image.dtype),
-        }
-        line = self._send(payload, timeout=self._TIMEOUT_SET_IMAGE)
-        if line.get("type") != "image_set":
-            raise RuntimeError("Failed to set image on model worker")
-        self.is_image_set = True
-        self.original_size = tuple(line.get("original_size", image.shape[:2]))
+        with self._op_lock:
+            self.start()
+            payload = {
+                "action": "set_image",
+                "image": base64.b64encode(image.tobytes()).decode("utf-8"),
+                "image_shape": list(image.shape),
+                "image_dtype": str(image.dtype),
+            }
+            line = self._send(payload, timeout=self._TIMEOUT_SET_IMAGE)
+            if line.get("type") != "image_set":
+                raise RuntimeError("Failed to set image on model worker")
+            self.is_image_set = True
+            self.original_size = tuple(line.get("original_size", image.shape[:2]))
 
     def predict(
         self,
@@ -226,6 +226,25 @@ class ModelPredictor:
         *,
         mask_input=None,
         multimask_output: bool | None = None,
+        pick_at=None,
+    ) -> tuple[np.ndarray, float]:
+        with self._op_lock:
+            return self._predict_unlocked(
+                point_coords,
+                point_labels,
+                mask_input=mask_input,
+                multimask_output=multimask_output,
+                pick_at=pick_at,
+            )
+
+    def _predict_unlocked(
+        self,
+        point_coords,
+        point_labels,
+        *,
+        mask_input=None,
+        multimask_output: bool | None = None,
+        pick_at=None,
     ) -> tuple[np.ndarray, float]:
         coords = np.asarray(point_coords, dtype=np.float32)
         if coords.size == 0:
@@ -248,6 +267,10 @@ class ModelPredictor:
             payload["mask_input_dtype"] = "float32"
         if multimask_output is not None:
             payload["multimask_output"] = multimask_output
+        if pick_at is not None:
+            pt = np.asarray(pick_at, dtype=np.float32).reshape(-1)
+            if pt.size >= 2:
+                payload["pick_at"] = [float(pt[0]), float(pt[1])]
 
         data = self._send(payload)
         if data.get("type") != "predict_result":

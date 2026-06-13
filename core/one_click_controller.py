@@ -21,7 +21,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgisInterface, QgsRubberBand
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -35,7 +35,11 @@ from .one_click_crop import (
     upscale_mask_to_crop,
 )
 from .one_click_prompts import OneClickPromptManager
-from .one_click_workers import ModelEncodeWorker, ModelInitWorker, ModelPredictWorker
+from .one_click_workers import (
+    ModelEncodeWorker,
+    ModelInitWorker,
+    ModelPredictWorker,
+)
 from .model_config import (
     LOG_CHANNEL,
     checkpoint_exists,
@@ -118,7 +122,7 @@ class OneClickSegmentationController:
             message = self.settings.tr(
                 "Validate a paid licence key, then try Start again."
             )
-        QtWidgets.QMessageBox.warning(
+        QMessageBox.warning(
             self.settings,
             self.settings.tr("License required"),
             message,
@@ -134,7 +138,7 @@ class OneClickSegmentationController:
             return True
         ok, msg, _data = acc.consume_for_one_click_session()
         if not ok:
-            QtWidgets.QMessageBox.warning(
+            QMessageBox.warning(
                 self.settings,
                 self.settings.tr("Trial quota"),
                 msg or self.settings.tr("Cannot start segmentation."),
@@ -673,17 +677,27 @@ class OneClickSegmentationController:
             sanitize_log_line(message)[:500],
         )
 
+    def _model_workers_busy(self) -> bool:
+        for worker in (
+            self._predict_worker,
+            self._encode_worker,
+        ):
+            if worker is not None and worker.isRunning():
+                return True
+        return False
+
     def _run_predict(self):
         if not self.predictor or not self.prompts.positive_points:
             return
+        if self._predicting or self._model_workers_busy():
+            return
+        negatives = self.prompts.negative_points
         model_pts = [
             model_pixels_from_crop(p, self._crop_info)
-            for p in self.prompts.positive_points + self.prompts.negative_points
+            for p in self.prompts.positive_points + negatives
         ]
         coords = np.array(model_pts, dtype=np.float32).reshape(-1, 2).tolist()
-        labels = [1] * len(self.prompts.positive_points) + [0] * len(
-            self.prompts.negative_points
-        )
+        labels = [1] * len(self.prompts.positive_points) + [0] * len(negatives)
         self._predicting = True
         self.settings.set_busy(True, self.settings.tr("Updating mask…"))
         mask_input = None
@@ -691,7 +705,7 @@ class OneClickSegmentationController:
         if self.predictor:
             mask_input = self.predictor._low_res_mask
         pos = len(self.prompts.positive_points)
-        neg = len(self.prompts.negative_points)
+        neg = len(negatives)
         if pos == 1 and neg == 0 and mask_input is None:
             multimask = True
         self._predict_worker = ModelPredictWorker(

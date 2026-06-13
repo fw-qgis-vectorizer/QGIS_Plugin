@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Space-key pan toggle for one-click segmentation (works when dock has focus)."""
+"""Space-key pan toggle for map tools (works when dock/dialog has focus)."""
 
 from qgis.PyQt.QtCore import QEvent, QObject, Qt
 from qgis.PyQt.QtWidgets import QDoubleSpinBox, QLineEdit, QPlainTextEdit, QSpinBox, QTextEdit
@@ -14,17 +14,21 @@ except AttributeError:
     _KEY_PRESS = QEvent.KeyPress
 
 
-class OneClickShortcutFilter(QObject):
-    """Space toggles pan mode on the main window during segmentation."""
+class SpacePanShortcutFilter(QObject):
+    """Space toggles pan mode on the main window while a map tool is active."""
 
-    def __init__(self, controller, parent=None):
+    def __init__(self, map_tool_getter, parent=None):
         super().__init__(parent)
-        self._controller = controller
+        self._map_tool_getter = map_tool_getter
+
+    def _current_map_tool(self):
+        if callable(self._map_tool_getter):
+            return self._map_tool_getter()
+        return getattr(self._map_tool_getter, "map_tool", None)
 
     def eventFilter(self, _obj, event):
         event_type = event.type()
-        controller = self._controller
-        map_tool = controller.map_tool
+        map_tool = self._current_map_tool()
 
         if event_type in (_SHORTCUT_OVERRIDE, _KEY_PRESS):
             if event.key() == _KEY_SPACE and map_tool and not event.isAutoRepeat():
@@ -54,3 +58,6 @@ class OneClickShortcutFilter(QObject):
             return False
 
         return False
+
+
+OneClickShortcutFilter = SpacePanShortcutFilter

@@ -57,5 +57,9 @@ class ApiRoutes:
         return _join_url(inference_base, "qgis", "download", "json", str(job_id))
 
     @staticmethod
+    def qgis_edit(inference_base):
+        return _join_url(inference_base, "qgis", "edit")
+
+    @staticmethod
     def csv_download(inference_base, job_id):
         return _join_url(inference_base, "download", "csv", str(job_id))

@@ -35,6 +35,8 @@ AlignLeft = _qt("AlignmentFlag", "AlignLeft")
 AlignTop = _qt("AlignmentFlag", "AlignTop")
 PlainText = _qt("TextFormat", "PlainText")
 ItemDataUserRole = _qt("ItemDataRole", "UserRole")
+CheckStateChecked = _qt("CheckState", "Checked")
+AlignCenter = _qt("AlignmentFlag", "AlignCenter")
 
 # Global colors (prefer QColor in new code; these are for QgsRubberBand.setColor)
 try:

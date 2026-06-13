@@ -29,6 +29,19 @@ class OneClickPromptManager:
                 break
         return label, point
 
+    def remove_nearest_negative(self, col: float, row: float, max_dist: float = 24.0) -> bool:
+        best_idx = None
+        best_dist = float(max_dist)
+        for idx, (c, r) in enumerate(self.negative_points):
+            dist = ((c - col) ** 2 + (r - row) ** 2) ** 0.5
+            if dist <= best_dist:
+                best_dist = dist
+                best_idx = idx
+        if best_idx is None:
+            return False
+        self.negative_points.pop(best_idx)
+        return True
+
     def clear(self):
         self.positive_points = []
         self.negative_points = []

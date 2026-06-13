@@ -133,6 +133,36 @@ def build_predictor(checkpoint_path: str):
     _predictor.model.eval()
 
 
+def _pick_best_mask(masks, scores):
+    if masks is None or len(masks) == 0:
+        return None, None, None
+    if len(masks) == 1:
+        return masks[0], scores[0] if scores is not None and len(scores) else 0.0, 0
+    total = masks[0].shape[0] * masks[0].shape[1]
+    areas = [int(m.sum()) for m in masks]
+    small = [i for i, a in enumerate(areas) if a < 0.8 * total]
+    idx = max(small, key=lambda i: float(scores[i])) if small else int(np.argmax(scores))
+    return masks[idx], scores[idx], idx
+
+
+def _pick_mask_at_point(masks, scores, pick_at):
+    """Prefer the multimask candidate that contains the click."""
+    if masks is None or len(masks) == 0:
+        return None, None, None
+    col, row = float(pick_at[0]), float(pick_at[1])
+    candidates = []
+    for i, m in enumerate(masks):
+        arr = m.cpu().numpy() if hasattr(m, "cpu") else np.asarray(m)
+        r = int(round(row))
+        c = int(round(col))
+        if 0 <= r < arr.shape[0] and 0 <= c < arr.shape[1] and arr[r, c]:
+            candidates.append(i)
+    if candidates:
+        idx = max(candidates, key=lambda i: float(scores[i]))
+        return masks[idx], scores[idx], idx
+    return _pick_best_mask(masks, scores)
+
+
 def _safe_readline():
     line = sys.stdin.readline()
     if len(line) > MAX_LINE_LENGTH:
@@ -191,35 +221,79 @@ def main():
 
             elif action == "predict":
                 coords = np.array(req.get("point_coords") or [], dtype=np.float32)
-                labels = np.array(req.get("point_labels") or [], dtype=np.int32)
+                if coords.ndim == 1 and coords.size >= 2:
+                    coords = coords.reshape(-1, 2)
+                elif coords.ndim == 2 and coords.shape[-1] != 2:
+                    coords = coords.reshape(-1, 2)
+                labels = np.array(req.get("point_labels") or [], dtype=np.int32).reshape(-1)
                 if coords.size == 0:
                     send_error("No point prompts provided")
                     continue
 
-                with torch.inference_mode():
-                    masks, scores, low_res = _predictor.predict(
-                        point_coords=coords,
-                        point_labels=labels,
-                        multimask_output=False,
+                mask_input = None
+                if req.get("mask_input"):
+                    mask_input = decode_array(
+                        req["mask_input"],
+                        req["mask_input_shape"],
+                        req.get("mask_input_dtype", "float32"),
                     )
+
+                multimask = bool(req.get("multimask_output", False))
+                if mask_input is None and labels.size and (labels == 1).sum() == 1:
+                    if (labels == 0).sum() == 0:
+                        multimask = True
+
+                predict_kwargs = {
+                    "point_coords": coords,
+                    "point_labels": labels,
+                    "multimask_output": multimask,
+                }
+                if mask_input is not None:
+                    predict_kwargs["mask_input"] = mask_input
+
+                with torch.inference_mode():
+                    masks, scores, low_res = _predictor.predict(**predict_kwargs)
 
                 if masks is None or len(masks) == 0:
                     send_error("Model returned no mask")
                     continue
 
-                mask = masks[0]
+                pick_at = req.get("pick_at")
+                if multimask and len(masks) > 1:
+                    if pick_at:
+                        mask, score, idx = _pick_mask_at_point(masks, scores, pick_at)
+                    else:
+                        mask, score, idx = _pick_best_mask(masks, scores)
+                    if hasattr(low_res, "__len__") and len(low_res) > idx:
+                        lr = low_res[idx]
+                    else:
+                        lr = low_res[0] if len(low_res) else None
+                else:
+                    mask = masks[0]
+                    score = float(scores[0]) if scores is not None and len(scores) else 0.0
+                    lr = low_res[0] if low_res is not None and len(low_res) else None
+
                 if hasattr(mask, "cpu"):
                     mask = mask.cpu().numpy()
                 mask = (mask > 0).astype(np.uint8)
+                try:
+                    from scipy import ndimage
+
+                    labeled, count = ndimage.label(mask)
+                    if count > 1:
+                        sizes = ndimage.sum(mask, labeled, range(1, count + 1))
+                        keep = int(np.argmax(sizes)) + 1
+                        mask = (labeled == keep).astype(np.uint8)
+                except Exception:
+                    pass
 
                 payload = {
                     "mask": encode_array(mask),
                     "mask_shape": list(mask.shape),
                     "mask_dtype": "uint8",
-                    "score": float(scores[0]) if scores is not None and len(scores) else 0.0,
+                    "score": float(score),
                 }
-                if low_res is not None and len(low_res):
-                    lr = low_res[0]
+                if lr is not None:
                     if hasattr(lr, "cpu"):
                         lr = lr.cpu().numpy()
                     payload["low_res_mask"] = encode_array(lr.astype(np.float32))

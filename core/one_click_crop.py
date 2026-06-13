@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import math
-from collections import deque
-
 import numpy as np
 from qgis.core import (
     Qgis,
@@ -293,38 +291,21 @@ def model_pixels_from_crop(
     return crop_pixels[0] * scale, crop_pixels[1] * scale
 
 
-def keep_largest_mask_component(mask: np.ndarray) -> np.ndarray:
-    """Drop small islands / bridge noise — keep the largest connected region."""
-    binary = (mask > 0).astype(np.uint8)
-    if not np.any(binary):
-        return binary
+def _select_mask_geometries(geoms: list, keep_all: bool, pixel_width: float) -> list:
+    """
+    Component filtering on polygons instead of pixels.
 
-    h, w = binary.shape
-    labels = np.zeros((h, w), dtype=np.int32)
-    sizes: dict[int, int] = {}
-    label_id = 0
-
-    for y in range(h):
-        for x in range(w):
-            if binary[y, x] == 0 or labels[y, x] != 0:
-                continue
-            label_id += 1
-            stack = deque([(y, x)])
-            labels[y, x] = label_id
-            size = 0
-            while stack:
-                cy, cx = stack.pop()
-                size += 1
-                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
-                    if 0 <= ny < h and 0 <= nx < w and binary[ny, nx] and labels[ny, nx] == 0:
-                        labels[ny, nx] = label_id
-                        stack.append((ny, nx))
-            sizes[label_id] = size
-
-    if not sizes:
-        return binary
-    best = max(sizes, key=sizes.get)
-    return (labels == best).astype(np.uint8)
+    The previous pixel-by-pixel pure-Python labeling took minutes on the UI
+    thread for large/noisy masks (QGIS "Not Responding"). Polygon areas give
+    the same result at C speed.
+    """
+    if not geoms:
+        return geoms
+    if not keep_all:
+        return [max(geoms, key=lambda g: g.area())]
+    min_area = (pixel_width * pixel_width) * 24.0
+    kept = [g for g in geoms if g.area() >= min_area]
+    return kept or [max(geoms, key=lambda g: g.area())]
 
 
 def click_needs_new_crop(
@@ -352,22 +333,32 @@ def click_needs_new_crop(
     return True
 
 
-def mask_to_map_geometries(mask: np.ndarray, crop_info: dict, simplify: float | None = None):
-    """Convert binary mask to QgsGeometry list in layer CRS."""
+def mask_to_map_geometries(
+    mask: np.ndarray,
+    crop_info: dict,
+    simplify: float | None = None,
+    *,
+    keep_all: bool = False,
+):
+    """
+    Convert binary mask to QgsGeometry list in layer CRS.
+
+    keep_all=False keeps only the largest component (single-object masks);
+    keep_all=True keeps every component above a small area threshold
+    (obstacle overlays with one blob per click).
+    """
     from qgis.core import QgsGeometry
 
     if mask is None or not np.any(mask):
         return []
 
-    mask = keep_largest_mask_component(mask)
-
+    pw = abs(float(crop_info.get("pixel_width", 1.0)))
     if simplify is None:
-        pw = abs(float(crop_info.get("pixel_width", 1.0)))
         simplify = max(pw * 0.75, 0.01)
 
     geoms = _mask_polygon_geometries_gdal(mask, crop_info, simplify)
     if geoms:
-        return geoms
+        return _select_mask_geometries(geoms, keep_all, pw)
 
     try:
         from rasterio.features import shapes as get_shapes
@@ -395,15 +386,19 @@ def mask_to_map_geometries(mask: np.ndarray, crop_info: dict, simplify: float | 
             if simplify > 0:
                 g = g.simplify(simplify)
             geoms.append(g)
-    return geoms or _mask_bbox_geometries(mask, crop_info)
+    if geoms:
+        return _select_mask_geometries(geoms, keep_all, pw)
+    return _mask_bbox_geometries(mask, crop_info)
 
 
-def _mask_polygon_geometries_gdal(
+def _gdal_polygonize_wkts(
     mask: np.ndarray, crop_info: dict, simplify: float
-) -> list:
-    """Polygonize mask with GDAL (bundled with QGIS) — true roof outlines, not bboxes."""
-    from qgis.core import QgsGeometry
+) -> list[tuple[str, float]]:
+    """
+    Polygonize a mask with GDAL only (no QGIS objects).
 
+    Safe to call from background QThreads — returns (wkt, area) pairs.
+    """
     try:
         from osgeo import gdal, ogr, osr
     except ImportError:
@@ -446,18 +441,81 @@ def _mask_polygon_geometries_gdal(
     if err != 0:
         return []
 
-    geoms = []
+    out: list[tuple[str, float]] = []
     for feat in dst_lyr:
         if feat.GetField(0) == 0:
             continue
         ogr_geom = feat.GetGeometryRef()
         if ogr_geom is None or ogr_geom.IsEmpty():
             continue
-        g = QgsGeometry.fromWkt(ogr_geom.ExportToWkt())
-        if not g or g.isEmpty():
-            continue
         if simplify > 0:
-            g = g.simplify(simplify)
+            ogr_geom = ogr_geom.Simplify(simplify)
+            if ogr_geom is None or ogr_geom.IsEmpty():
+                continue
+        wkt = ogr_geom.ExportToWkt()
+        if wkt:
+            out.append((wkt, float(ogr_geom.GetArea())))
+    return out
+
+
+def mask_to_wkt_polygons(
+    mask: np.ndarray,
+    crop_info: dict,
+    simplify: float | None = None,
+    *,
+    keep_all: bool = False,
+) -> list[str]:
+    """Convert binary mask to WKT polygons (thread-safe, no QGIS geometry objects)."""
+    if mask is None or not np.any(mask):
+        return []
+
+    pw = abs(float(crop_info.get("pixel_width", 1.0)))
+    if simplify is None:
+        simplify = max(pw * 0.75, 0.01)
+
+    pairs = _gdal_polygonize_wkts(mask, crop_info, simplify)
+    if not pairs:
+        return _mask_bbox_wkts(mask, crop_info)
+
+    min_area = (pw * pw) * 24.0
+    if keep_all:
+        kept = [wkt for wkt, area in pairs if area >= min_area]
+        if kept:
+            return kept
+        best = max(pairs, key=lambda item: item[1])
+        return [best[0]]
+
+    best = max(pairs, key=lambda item: item[1])
+    return [best[0]]
+
+
+def _mask_bbox_wkts(mask: np.ndarray, crop_info: dict) -> list[str]:
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0:
+        return []
+    pw = crop_info["pixel_width"]
+    ph = crop_info["pixel_height"]
+    xmin = crop_info["xmin"]
+    ymax = crop_info["ymax"]
+    x0 = xmin + xs.min() * pw
+    x1 = xmin + (xs.max() + 1) * pw
+    y0 = ymax + ys.max() * ph
+    y1 = ymax + (ys.min()) * ph
+    y_lo, y_hi = min(y0, y1), max(y0, y1)
+    return [
+        f"POLYGON (({x0} {y_lo}, {x1} {y_lo}, {x1} {y_hi}, {x0} {y_hi}, {x0} {y_lo}))"
+    ]
+
+
+def _mask_polygon_geometries_gdal(
+    mask: np.ndarray, crop_info: dict, simplify: float
+) -> list:
+    """Polygonize mask with GDAL (bundled with QGIS) — true roof outlines, not bboxes."""
+    from qgis.core import QgsGeometry
+
+    geoms = []
+    for wkt, _area in _gdal_polygonize_wkts(mask, crop_info, simplify):
+        g = QgsGeometry.fromWkt(wkt)
         if g and not g.isEmpty():
             geoms.append(g)
     return geoms

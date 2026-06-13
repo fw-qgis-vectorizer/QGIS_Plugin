@@ -56,6 +56,7 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 _PAGE_LANDING = 0
 _PAGE_ONE_CLICK = 1
 _PAGE_VECTORIZATION = 2
+_PAGE_OBSTACLE_REMOVAL = 3
 
 _LANDING_ACTION_STYLE = (
     "QPushButton {"
@@ -133,6 +134,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     processing_started = QtCore.pyqtSignal()
     # Open one-click segmentation settings (small window)
     one_click_requested = QtCore.pyqtSignal()
+    # Open AI Obstacle Removal (nano banana edit)
+    obstacle_removal_requested = QtCore.pyqtSignal()
     
     def __init__(self, parent=None, iface=None):
         """Constructor."""
@@ -259,10 +262,14 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._btn_one_click = QtWidgets.QPushButton(self.tr("One-Click Segmentation"))
         self._btn_large_area = QtWidgets.QPushButton(self.tr("Large Area Vectorization"))
+        self._btn_obstacle_removal = QtWidgets.QPushButton(
+            self.tr("AI Imagery Edit")
+        )
         self._btn_order_imagery = QtWidgets.QPushButton(self.tr("Order Drone Imagery"))
         _landing_icons = (
             (self._btn_one_click, "click.png"),
             (self._btn_large_area, "map.png"),
+            (self._btn_obstacle_removal, "map.png"),
             (self._btn_order_imagery, "drone.png"),
         )
         for btn, icon_file in _landing_icons:
@@ -296,6 +303,9 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self._landingGetLicenceButton.clicked.connect(self.open_fieldwatch_website)
         self._btn_one_click.clicked.connect(self.one_click_requested.emit)
         self._btn_large_area.clicked.connect(lambda: self._show_page(_PAGE_VECTORIZATION))
+        self._btn_obstacle_removal.clicked.connect(
+            self.obstacle_removal_requested.emit
+        )
         self._btn_order_imagery.clicked.connect(self.open_order_imagery_dialog)
         self.howToUsePluginButton.clicked.connect(self.open_how_to_use_plugin_video)
         self.sendFeedbackButton.clicked.connect(self.open_feedback_dialog)

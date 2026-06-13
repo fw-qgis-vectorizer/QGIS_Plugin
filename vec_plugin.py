@@ -33,6 +33,7 @@ from .resources import *
 from .dialogs.vec_plugin_dialog import VecPluginDialog
 from .dialogs.order_imagery_dialog import OrderImageryDialog
 from .dialogs.one_click_settings_dialog import OneClickSettingsDialog
+from .dialogs.obstacle_removal_dialog import ObstacleRemovalDialog
 from .core.one_click_controller import OneClickSegmentationController
 from .core.vec_inference_client import VecInferenceClient
 from .core.api_config import INFERENCE_BASE_URL, UPLOAD_BASE_URL
@@ -112,6 +113,7 @@ class VecPlugin:
         self.first_start = None
         self.one_click_dlg = None
         self.one_click_controller = None
+        self.obstacle_removal_dlg = None
         self._segmentation_predictor = None
         self._segmentation_preload_worker = None
         self._segmentation_preloading = False
@@ -231,6 +233,13 @@ class VecPlugin:
         """Removes the plugin menu item and icon from QGIS GUI."""
         if self.one_click_controller:
             self.one_click_controller.shutdown()
+        if self.obstacle_removal_dlg is not None:
+            try:
+                self.obstacle_removal_dlg.shutdown()
+                self.obstacle_removal_dlg.hide()
+            except RuntimeError:
+                pass
+            self.obstacle_removal_dlg = None
         self.one_click_dlg = None
         self.one_click_controller = None
         if self._segmentation_predictor is not None:
@@ -261,6 +270,11 @@ class VecPlugin:
             except Exception:
                 pass
             self.dlg.one_click_requested.connect(self.run_one_click_segmentation)
+            try:
+                self.dlg.obstacle_removal_requested.disconnect()
+            except Exception:
+                pass
+            self.dlg.obstacle_removal_requested.connect(self.run_obstacle_removal)
 
         QTimer.singleShot(0, self._preload_segmentation_model)
 
@@ -365,6 +379,20 @@ class VecPlugin:
         self.one_click_dlg.show()
         self.one_click_dlg.raise_()
         self.one_click_dlg.activateWindow()
+
+    def run_obstacle_removal(self):
+        """Open AI Obstacle Removal (nano banana / POST /qgis/edit)."""
+        if self.obstacle_removal_dlg is None:
+            self.obstacle_removal_dlg = ObstacleRemovalDialog(
+                self.iface, pack_dialog=self.dlg
+            )
+        else:
+            self.obstacle_removal_dlg.licensePanel.refresh_trial_state(force=True)
+            self.obstacle_removal_dlg.populate_layers()
+            self.obstacle_removal_dlg._sync_apply_state()
+        self.obstacle_removal_dlg.show()
+        self.obstacle_removal_dlg.raise_()
+        self.obstacle_removal_dlg.activateWindow()
     
     def _start_processing(self):
         """Start the inference processing."""

@@ -8,7 +8,7 @@ name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=One-Click and large area vectorization inference service for building detection, drone imagery ordering.
-version=4.0
+version=5.0
 author=FieldWatch
 email=support@usefieldwatch.com
 
@@ -22,11 +22,10 @@ repository=https://github.com/fw-qgis-vectorizer/QGIS_Plugin
 # Recommended items:
 
 hasProcessingProvider=no
-# Uncomment the following line and add your changelog:
-changelog=4.0: one-click segmentation, auto-trial, QGIS 3/4 + Qt6, feedback, unload fix.
+changelog=5.0: AI Imagery Edit (obstacle removal + solar panels), plugin unload fix.
 
 # Tags are comma separated with spaces allowed
-tags=raster,vector,ai,machine learning,building detection,segmentation,inference
+tags=raster,vector,ai,machine learning,building detection,segmentation,inference,inpainting,solar panels
 
 homepage=https://usefieldwatch.com/
 icon=resources/icons/binocular.png
