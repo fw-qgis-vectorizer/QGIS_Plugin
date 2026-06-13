@@ -209,7 +209,7 @@ From the plugin root on Windows:
 .\package_vec_plugin.ps1
 ```
 
-This creates `vec_plugin.zip` (or `fieldwatch_vectorizer_5.0.zip`) containing a `vec_plugin/` folder ready for **Install from ZIP** or official repository submission. Dev files (`__pycache__`, specs, local caches) are excluded.
+This creates `vec_plugin.zip` containing a `vec_plugin/` folder ready for **Install from ZIP** or official repository submission. Dev files (`__pycache__`, specs, local caches) are excluded.
 
 ---
 
