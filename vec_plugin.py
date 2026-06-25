@@ -556,7 +556,7 @@ class VecPlugin:
             self._is_processing = False
             
             # Re-enable buttons
-            self.dlg.runButton.setEnabled(True)
+            self.dlg._sync_ok_button_state()
             self.dlg.cancelButton.setEnabled(True)
             
             # Reconnect processing signal
@@ -627,7 +627,7 @@ class VecPlugin:
             self.dlg.statusLabel.setText("Complete!")
             
             # Re-enable buttons
-            self.dlg.runButton.setEnabled(True)
+            self.dlg._sync_ok_button_state()
             self.dlg.cancelButton.setEnabled(True)
             
             # Reset processing flag
@@ -686,7 +686,7 @@ class VecPlugin:
                 level=2,  # Critical
                 duration=10
             )
-            self.dlg.runButton.setEnabled(True)
+            self.dlg._sync_ok_button_state()
             self.dlg.cancelButton.setEnabled(True)
             
             # Reconnect processing signal to allow retry

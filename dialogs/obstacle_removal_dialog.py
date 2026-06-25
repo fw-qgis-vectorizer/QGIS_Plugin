@@ -26,6 +26,7 @@ from ..core.obstacle_edit_config import (
 from ..core.qgis_layer_utils import layer_is_usable, list_project_raster_layers
 from ..core.qt_compat import AlignCenter, CheckStateChecked, ItemDataUserRole, dialog_exec
 from ..core.trial_access import shared as trial_shared
+from ..core import trial_helpers
 from ..core.obstacle_crop import (
     geometry_to_mask_geojson,
     rect_tuple_from_qgs_rect,
@@ -403,19 +404,18 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
         acc = trial_shared()
         lic_ok = acc.can_run_large_area()
         busy = self._is_busy()
-        self.applyButton.setEnabled(
-            georef_ok and has_prompt and has_boxes and lic_ok and not busy
-        )
-        self.applySolarButton.setEnabled(
-            georef_ok and has_solar and lic_ok and not busy
-        )
+        from ..core.onboarding_helpers import set_process_button_enabled
+
+        apply_ready = georef_ok and has_prompt and has_boxes and lic_ok and not busy
+        set_process_button_enabled(self.applyButton, apply_ready)
+        solar_ready = georef_ok and has_solar and lic_ok and not busy
+        set_process_button_enabled(self.applySolarButton, solar_ready)
         self.drawBoxButton.setEnabled(georef_ok and not busy)
         self.clearBoxesButton.setEnabled(has_boxes and not busy)
         self.drawSolarButton.setEnabled(georef_ok and not busy)
         self.clearSolarButton.setEnabled(has_solar and not busy)
-        self.exportMergedButton.setEnabled(
-            georef_ok and self._has_merge_selection() and not busy
-        )
+        export_ready = georef_ok and self._has_merge_selection() and not busy
+        set_process_button_enabled(self.exportMergedButton, export_ready)
         if layer and not georef_ok:
             self.statusLabel.setText(
                 self.tr("Selected layer must be georeferenced.")
@@ -844,40 +844,68 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
         )
         if not layer or not prompt or not self._boxes:
             return
-        jobs = []
-        for i, box in enumerate(self._boxes):
-            jobs.append(
-                {
-                    "crop_rect": box["rect_tuple"],
-                    "mask_geojson": rect_tuple_to_mask_geojson(box["rect_tuple"]),
-                    "prompt": prompt,
-                    "layer_suffix": f"edit_{i + 1}",
-                }
+
+        def proceed():
+            jobs = []
+            for i, box in enumerate(self._boxes):
+                jobs.append(
+                    {
+                        "crop_rect": box["rect_tuple"],
+                        "mask_geojson": rect_tuple_to_mask_geojson(box["rect_tuple"]),
+                        "prompt": prompt,
+                        "layer_suffix": f"edit_{i + 1}",
+                    }
+                )
+            self._start_edit_worker(
+                layer, jobs, float(self.paddingSpin.value()), "obstacle", self._boxes
             )
-        self._start_edit_worker(
-            layer, jobs, float(self.paddingSpin.value()), "obstacle", self._boxes
+
+        acc = trial_shared()
+        from ..core.onboarding_helpers import require_onboarding
+
+        require_onboarding(
+            self,
+            acc.install_key,
+            proceed,
+            on_registered=self._after_onboarding_registered,
         )
+
+    def _after_onboarding_registered(self):
+        self.licensePanel.refresh_trial_state(force=True)
+        self._sync_apply_state()
 
     def apply_solar_panels(self):
         layer = self.get_raster_layer()
         if not layer or not self._solar_areas:
             return
-        jobs = []
-        for i, area in enumerate(self._solar_areas):
-            jobs.append(
-                {
-                    "crop_rect": area["bbox_tuple"],
-                    "mask_geojson": area["mask_geojson"],
-                    "prompt": SOLAR_PANELS_PROMPT,
-                    "layer_suffix": f"solar_{i + 1}",
-                }
+
+        def proceed():
+            jobs = []
+            for i, area in enumerate(self._solar_areas):
+                jobs.append(
+                    {
+                        "crop_rect": area["bbox_tuple"],
+                        "mask_geojson": area["mask_geojson"],
+                        "prompt": SOLAR_PANELS_PROMPT,
+                        "layer_suffix": f"solar_{i + 1}",
+                    }
+                )
+            self._start_edit_worker(
+                layer,
+                jobs,
+                float(self.solarPaddingSpin.value()),
+                "solar",
+                self._solar_areas,
             )
-        self._start_edit_worker(
-            layer,
-            jobs,
-            float(self.solarPaddingSpin.value()),
-            "solar",
-            self._solar_areas,
+
+        acc = trial_shared()
+        from ..core.onboarding_helpers import require_onboarding
+
+        require_onboarding(
+            self,
+            acc.install_key,
+            proceed,
+            on_registered=self._after_onboarding_registered,
         )
 
     def _start_edit_worker(

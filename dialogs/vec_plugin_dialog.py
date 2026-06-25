@@ -45,6 +45,12 @@ from ..core.qt_compat import (
 )
 from ..core.trial_access import shared as trial_shared
 from ..core.trial_workers import TrialGenerateWorker, TrialStateFetchWorker
+from ..core.onboarding_helpers import (
+    prompt_onboarding_if_needed,
+    require_onboarding,
+    set_process_button_enabled,
+    show_onboarding_dialog,
+)
 
 # Browser destination for paid licence keys.
 FIELDWATCH_HOME_URL = "https://usefieldwatch.com/"
@@ -145,6 +151,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.map_tool = None
         self.previous_map_tool = None
         self.order_imagery_dialog = None
+        self._returning_from_polygon_draw = False
         
         # Set up the user interface from Designer through FORM_CLASS.
         # After self.setupUi() you can access any designer object by doing
@@ -189,6 +196,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._setup_page_navigation()
 
+        trial_helpers.maybe_migrate_legacy_onboarding()
+
         # Populate the input layer combo box with raster layers
         self.populate_layers()
         
@@ -218,7 +227,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.runButton.setEnabled(False)
         self.runButton.setDefault(True)
 
-        self._show_page(_PAGE_LANDING)
+        self._show_initial_page()
 
     @staticmethod
     def _landing_workflow_icon(filename):
@@ -295,9 +304,14 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         landing_footer.setSpacing(10)
         self.howToUsePluginButton = QtWidgets.QPushButton(self.tr("How to use this plugin"))
         self.sendFeedbackButton = QtWidgets.QPushButton(self.tr("Send feedback"))
+        self.termsButton = QtWidgets.QPushButton(self.tr("Terms"))
+        self.termsButton.setToolTip(
+            self.tr("Enter your email and accept the terms and conditions.")
+        )
         landing_footer.addWidget(self.howToUsePluginButton)
         landing_footer.addWidget(self.sendFeedbackButton)
         landing_footer.addStretch()
+        landing_footer.addWidget(self.termsButton)
         landing_layout.addLayout(landing_footer)
 
         self._landingGetLicenceButton.clicked.connect(self.open_fieldwatch_website)
@@ -309,6 +323,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self._btn_order_imagery.clicked.connect(self.open_order_imagery_dialog)
         self.howToUsePluginButton.clicked.connect(self.open_how_to_use_plugin_video)
         self.sendFeedbackButton.clicked.connect(self.open_feedback_dialog)
+        self.termsButton.clicked.connect(self._open_onboarding_from_terms)
 
         # --- One-click placeholder ---
         self._page_one_click = QtWidgets.QWidget()
@@ -423,13 +438,40 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             self.resize(440, 280)
 
+    def _show_initial_page(self):
+        """Landing hub, or large-area page when returning from polygon draw."""
+        if self._returning_from_polygon_draw:
+            self._returning_from_polygon_draw = False
+            self._show_page(_PAGE_VECTORIZATION)
+        else:
+            self._show_page(_PAGE_LANDING)
+
     def showEvent(self, event):
-        """Show landing first; sync deferred trial usage and fetch quota."""
+        """Show landing; prompt onboarding for new users; sync trial when complete."""
         super(VecPluginDialog, self).showEvent(event)
-        self._show_page(_PAGE_LANDING)
-        self._trial_acc.sync_pending_usages()
+        self._show_initial_page()
         self._sync_ui_from_trial_access()
-        QtCore.QTimer.singleShot(0, self.refresh_trial_state)
+        if trial_helpers.is_onboarding_complete():
+            self._trial_acc.sync_pending_usages()
+            QtCore.QTimer.singleShot(0, self.refresh_trial_state)
+        else:
+            QtCore.QTimer.singleShot(0, self._prompt_onboarding_on_open)
+
+    def _prompt_onboarding_on_open(self):
+        prompt_onboarding_if_needed(
+            self,
+            self._install_key,
+            on_registered=self._after_onboarding_registered,
+        )
+        self._sync_ok_button_state()
+
+    def _open_onboarding_from_terms(self):
+        show_onboarding_dialog(
+            self,
+            self._install_key,
+            on_registered=self._after_onboarding_registered,
+        )
+        self._sync_ok_button_state()
 
     def _sync_ui_from_trial_access(self):
         acc = self._trial_acc
@@ -735,10 +777,9 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self._sync_ok_button_state()
 
     def _sync_ok_button_state(self):
+        has_polygon = bool(self.crop_geometry and not self.crop_geometry.isEmpty())
         auth_ok = bool(self.jwt_token) or self.trial_can_run()
-        self.runButton.setEnabled(
-            bool(self.crop_geometry and not self.crop_geometry.isEmpty() and auth_ok)
-        )
+        set_process_button_enabled(self.runButton, has_polygon and auth_ok)
 
     def apply_trial_usage_denied(self, data):
         """Update UI after usage denied."""
@@ -962,6 +1003,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.cropStatusValueLabel.setStyleSheet("color: blue;")
         
         # Hide dialog temporarily so user can see the map
+        self._returning_from_polygon_draw = True
         self.hide()
     
     def polygon_finished(self, geometry):
@@ -1009,21 +1051,10 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.cropStatusValueLabel.setStyleSheet("color: red;")
         self.clearPolygonButton.setEnabled(False)
         self.drawPolygonButton.setEnabled(True)
-        
-        self.runButton.setEnabled(False)
+        self._sync_ok_button_state()
     
     def accept(self):
-        """Override accept to validate polygon is drawn and auth (paid or trial), then emit signal instead of closing."""
-        if not self.jwt_token and not self.trial_can_run():
-            QtWidgets.QMessageBox.warning(
-                self,
-                self.tr("License or trial required"),
-                self.tr(
-                    "Validate a paid licence key. Trial quota loads automatically on open."
-                ),
-            )
-            return
-        
+        """Validate polygon, onboarding, then start processing."""
         if not self.crop_geometry or self.crop_geometry.isEmpty():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -1032,20 +1063,38 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             return
 
-        if not self.jwt_token and self.trial_can_run():
-            self.get_trial_billable_idempotency_key()
+        def _run_processing():
+            if not self.jwt_token and not self.trial_can_run():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    self.tr("License or trial required"),
+                    self.tr(
+                        "Validate a paid licence key or wait for trial quota to load."
+                    ),
+                )
+                return
+            if not self.jwt_token and self.trial_can_run():
+                self.get_trial_billable_idempotency_key()
+            self.processing_started.emit()
+            if self.map_tool and self.iface:
+                canvas = self.iface.mapCanvas()
+                if canvas.mapTool() == self.map_tool:
+                    if self.previous_map_tool:
+                        canvas.setMapTool(self.previous_map_tool)
+                    else:
+                        canvas.unsetMapTool(self.map_tool)
 
-        # Emit signal to start processing (dialog stays open)
-        self.processing_started.emit()
-        
-        # Restore previous map tool if drawing was active
-        if self.map_tool and self.iface:
-            canvas = self.iface.mapCanvas()
-            if canvas.mapTool() == self.map_tool:
-                if self.previous_map_tool:
-                    canvas.setMapTool(self.previous_map_tool)
-                else:
-                    canvas.unsetMapTool(self.map_tool)
+        require_onboarding(
+            self,
+            self._install_key,
+            _run_processing,
+            on_registered=self._after_onboarding_registered,
+        )
+
+    def _after_onboarding_registered(self):
+        self._sync_ui_from_trial_access()
+        self._sync_ok_button_state()
+        QtCore.QTimer.singleShot(0, self.refresh_trial_state)
     
     def closeEvent(self, event):
         """Handle dialog close event."""

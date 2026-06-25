@@ -272,6 +272,7 @@ class OrderImageryDialog(QDialog):
         )
         self.submit_btn.clicked.connect(self._submit_request)
         layout.addWidget(self.submit_btn)
+        self._sync_submit_button_state()
 
         layout.addStretch(1)
 
@@ -668,6 +669,37 @@ class OrderImageryDialog(QDialog):
             "polygonCoords": polygon_coords
         }
 
+        from ..core import trial_helpers
+        from ..core.onboarding_helpers import require_onboarding
+
+        def proceed():
+            self._post_order_request(
+                payload,
+                area_ha=area_ha,
+                polygon_coords=polygon_coords,
+                resolution=resolution,
+                deliverable=deliverable,
+                name=name,
+                email=email,
+                company=company or "",
+                phone=phone,
+            )
+
+        require_onboarding(self, trial_helpers.ensure_install_key(), proceed)
+
+    def _post_order_request(
+        self,
+        payload,
+        *,
+        area_ha,
+        polygon_coords,
+        resolution,
+        deliverable,
+        name,
+        email,
+        company,
+        phone,
+    ):
         try:
             response = requests.post(
                 REQUEST_API_URL,
@@ -684,7 +716,7 @@ class OrderImageryDialog(QDialog):
                 price_estimate=area_ha / 100.0 * 300,
                 name=name,
                 email=email,
-                company=company or "",
+                company=company,
                 phone=phone
             )
         except requests.exceptions.Timeout:
@@ -739,8 +771,14 @@ class OrderImageryDialog(QDialog):
         self.confirmation_text.setTextFormat(PlainText)
         self.stacked_widget.setCurrentIndex(1)
 
+    def _sync_submit_button_state(self):
+        from ..core.onboarding_helpers import set_process_button_enabled
+
+        set_process_button_enabled(self.submit_btn, True)
+
     def showEvent(self, event):
         """Refresh embedded canvas when dialog is shown."""
         super(OrderImageryDialog, self).showEvent(event)
+        self._sync_submit_button_state()
         if self.canvas:
             self._setup_canvas()

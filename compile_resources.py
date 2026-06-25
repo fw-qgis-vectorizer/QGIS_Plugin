@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Regenerate resources/resources.py from resources/resources.qrc (Qt6-safe).
-
-After running, ensures ``from qgis.PyQt import QtCore`` so the plugin loads on
-QGIS 3 (Qt5) and QGIS 4 (Qt6).
-
-Usage (from plugin root):
-  python compile_resources.py
-"""
-
 from __future__ import annotations
 
 import os

@@ -327,10 +327,12 @@ class OneClickSettingsDialog(QtWidgets.QDialog):
 
     def _update_start_button_enabled(self):
         from ..core.trial_access import shared as trial_shared
+        from ..core.onboarding_helpers import set_process_button_enabled
 
         can_start = trial_shared().can_start_one_click_segmentation()
-        self.startButton.setEnabled(
-            can_start and not self._segmentation_active and not self._setup_busy
+        set_process_button_enabled(
+            self.startButton,
+            can_start and not self._segmentation_active and not self._setup_busy,
         )
 
     def set_action_enabled(self, action: str, enabled: bool):
@@ -346,7 +348,9 @@ class OneClickSettingsDialog(QtWidgets.QDialog):
         self.stopButton.setEnabled(active)
         has_layer = self.get_raster_layer() is not None
         self.layerCombo.setEnabled(not active and has_layer)
-        self.saveLayerButton.setEnabled(active)
+        from ..core.onboarding_helpers import set_process_button_enabled
+
+        set_process_button_enabled(self.saveLayerButton, active)
         self.refreshButton.setEnabled(not active)
 
         if active:
@@ -569,8 +573,25 @@ class OneClickSettingsDialog(QtWidgets.QDialog):
         self.refresh_all()
 
     def _on_start(self):
-        if self._controller:
-            self._controller.start_segmentation()
+        from ..core.trial_access import shared as trial_shared
+        from ..core.onboarding_helpers import require_onboarding
+
+        acc = trial_shared()
+
+        def proceed():
+            if self._controller:
+                self._controller.start_segmentation()
+
+        require_onboarding(
+            self,
+            acc.install_key,
+            proceed,
+            on_registered=self._after_onboarding_registered,
+        )
+
+    def _after_onboarding_registered(self):
+        self.licensePanel.refresh_trial_state(force=True)
+        self._update_start_button_enabled()
 
     def _on_stop(self):
         if self._controller:

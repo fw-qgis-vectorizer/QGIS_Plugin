@@ -65,3 +65,5 @@ folder/
 # Sample / ad-hoc data
 *.sh
 *.ps1
+*.gitignore
+*qgis_trial.md

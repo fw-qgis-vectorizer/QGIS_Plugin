@@ -16,6 +16,57 @@ from .api_config import ApiRoutes
 
 
 SETTINGS_GROUP = "vec_plugin"
+_FIELDWATCH_ROOT = os.path.join(os.path.expanduser("~"), ".qgis_fieldwatch")
+_INSTALL_KEY_FILENAME = "install_key"
+
+
+def _fieldwatch_root() -> str:
+    os.makedirs(_FIELDWATCH_ROOT, exist_ok=True)
+    return _FIELDWATCH_ROOT
+
+
+def _install_key_file_path() -> str:
+    return os.path.join(_fieldwatch_root(), _INSTALL_KEY_FILENAME)
+
+
+def _is_valid_install_key(value: str) -> bool:
+    try:
+        uuid.UUID(str(value or "").strip())
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _read_install_key_file() -> str:
+    path = _install_key_file_path()
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return (f.read() or "").strip()
+    except OSError:
+        return ""
+
+
+def _write_install_key_file(key: str) -> None:
+    path = _install_key_file_path()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(key.strip())
+
+
+def _read_install_key_qsettings() -> str:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    key = s.value("install_key", "", type=str) or ""
+    s.endGroup()
+    return key.strip()
+
+
+def _write_install_key_qsettings(key: str) -> None:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue("install_key", key.strip())
+    s.endGroup()
 
 
 def _plugin_version():
@@ -82,14 +133,29 @@ def client_telemetry():
 
 
 def ensure_install_key():
-    """Return stable per-profile install_key (creates and stores if missing)."""
-    s = QgsSettings()
-    s.beginGroup(SETTINGS_GROUP)
-    key = s.value("install_key", "", type=str) or ""
-    if not key:
-        key = str(uuid.uuid4())
-        s.setValue("install_key", key)
-    s.endGroup()
+    """
+    Return stable machine-wide install_key (creates and stores if missing).
+
+    Source of truth: ~/.qgis_fieldwatch/install_key
+    Legacy profiles migrate from QSettings on first run after update.
+    """
+    key = _read_install_key_file()
+    if _is_valid_install_key(key):
+        return key
+
+    legacy = _read_install_key_qsettings()
+    if _is_valid_install_key(legacy):
+        _write_install_key_file(legacy)
+        QgsMessageLog.logMessage(
+            "Migrated install_key from QSettings to ~/.qgis_fieldwatch/install_key",
+            "FieldWatch",
+            Qgis.Info,
+        )
+        return legacy
+
+    key = str(uuid.uuid4())
+    _write_install_key_file(key)
+    _write_install_key_qsettings(key)
     return key
 
 
@@ -143,6 +209,116 @@ def clear_trial_established() -> None:
     s.beginGroup(SETTINGS_GROUP)
     s.remove(_TRIAL_ESTABLISHED_KEY)
     s.endGroup()
+
+
+_ONBOARDING_COMPLETE_KEY = "onboarding_complete"
+_USER_EMAIL_KEY = "user_email"
+_ONBOARDING_COMPLETED_AT_KEY = "onboarding_completed_at"
+_ONBOARDING_LEGACY_SKIP_KEY = "onboarding_legacy_skip"
+
+
+def _settings_bool(raw) -> bool:
+    return raw in (True, "true", "True", "1", 1)
+
+
+def is_valid_email(email: str) -> bool:
+    """Minimal email check for onboarding (non-empty local@domain.tld)."""
+    email = normalize_trial_email(email)
+    if not email or "@" not in email:
+        return False
+    local, _, domain = email.partition("@")
+    return bool(local and domain and "." in domain)
+
+
+def normalize_trial_email(raw_email: str) -> str:
+    """Server-normalized email (strip + lowercase)."""
+    return (raw_email or "").strip().lower()
+
+
+def is_onboarding_complete() -> bool:
+    """
+    True when this QGIS profile finished onboarding: terms accepted, email posted,
+    and OK clicked (``onboarding_complete`` + stored email). Legacy upgrades may
+    skip without email via ``onboarding_legacy_skip``.
+    """
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    complete = _settings_bool(s.value(_ONBOARDING_COMPLETE_KEY, False))
+    legacy_skip = _settings_bool(s.value(_ONBOARDING_LEGACY_SKIP_KEY, False))
+    email = (s.value(_USER_EMAIL_KEY, "", type=str) or "").strip()
+    s.endGroup()
+    if not complete:
+        return False
+    if legacy_skip:
+        return True
+    return is_valid_email(email)
+
+
+def get_onboarding_completed_at() -> str:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    value = (s.value(_ONBOARDING_COMPLETED_AT_KEY, "", type=str) or "").strip()
+    s.endGroup()
+    return value
+
+
+def get_stored_user_email() -> str:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    email = s.value(_USER_EMAIL_KEY, "", type=str) or ""
+    s.endGroup()
+    return email.strip()
+
+
+def save_onboarding(email: str) -> None:
+    """Persist onboarding completion after successful POST /qgis/trial."""
+    from datetime import datetime, timezone
+
+    email = normalize_trial_email(email)
+    completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue(_USER_EMAIL_KEY, email)
+    s.setValue(_ONBOARDING_COMPLETE_KEY, True)
+    s.setValue(_ONBOARDING_COMPLETED_AT_KEY, completed_at)
+    s.remove(_ONBOARDING_LEGACY_SKIP_KEY)
+    s.endGroup()
+    s.sync()
+
+
+_ONBOARDING_MIGRATION_KEY = "onboarding_migrated_v1"
+
+
+def maybe_migrate_legacy_onboarding() -> None:
+    """
+    One-time upgrade path: existing users keep skipping onboarding; new profiles do not.
+    Must run before auto trial bootstrap on first dialog open.
+    """
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    if s.value(_ONBOARDING_MIGRATION_KEY, False) in (True, "true", "True", "1", 1):
+        s.endGroup()
+        return
+    if not _settings_bool(s.value(_ONBOARDING_COMPLETE_KEY, False)):
+        if is_trial_established() or load_paid_license().get("jwt_token"):
+            s.setValue(_ONBOARDING_COMPLETE_KEY, True)
+            s.setValue(_ONBOARDING_LEGACY_SKIP_KEY, True)
+    s.setValue(_ONBOARDING_MIGRATION_KEY, True)
+    s.endGroup()
+    s.sync()
+
+
+def bootstrap_trial_if_needed(inference_base_url, install_key, acc, timeout=15) -> None:
+    """After onboarding, ensure trial state exists before a billable workflow runs."""
+    if acc.has_paid_license():
+        return
+    if (acc.trial_id or get_stored_trial_id()) and acc.uses_remaining is not None:
+        return
+    data = request_trial_generate(inference_base_url, install_key, timeout=timeout)
+    data = normalize_trial_response(dict(data))
+    acc.apply_server_state(data)
+    if trial_id_from_response(data):
+        mark_trial_established()
 
 
 def set_trial_generate_locked_trial_id(trial_id: str) -> None:
@@ -272,6 +448,67 @@ def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5)
         raise Exception("Trial status returned invalid JSON.") from e
 
     return normalize_trial_response(data)
+
+
+def post_trial_email(
+    inference_base_url,
+    install_key,
+    email,
+    trial_id=None,
+    timeout=25,
+    ensure_trial_id=True,
+):
+    """
+    POST /qgis/trial — store email lead (first-run signup or trial exhausted).
+
+    See qgis_trial.md endpoint 3.
+    """
+    key = (install_key or "").strip()
+    if not key:
+        raise Exception("MISSING_INSTALL_KEY: install_key is required")
+    addr = normalize_trial_email(email)
+    if not is_valid_email(addr):
+        raise Exception("INVALID_EMAIL: Enter a valid email address.")
+
+    tid = (trial_id or get_stored_trial_id() or "").strip()
+    if ensure_trial_id and not tid:
+        try:
+            state = fetch_trial_state(
+                inference_base_url, key, trial_id=None, timeout=timeout
+            )
+            tid = trial_id_from_response(state)
+            if tid:
+                set_stored_trial_id(tid)
+        except Exception:
+            pass
+
+    url = ApiRoutes.qgis_trial_email(inference_base_url)
+    body = {
+        "email": addr,
+        "install_key": key,
+    }
+    if tid:
+        body["trial_id"] = tid
+    body.update(client_telemetry())
+
+    try:
+        r = requests.post(url, json=body, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Email signup request failed: {e}") from e
+
+    try:
+        data = r.json() if r.text else {}
+    except ValueError:
+        data = {}
+
+    if r.status_code == 201:
+        return data
+
+    err = data.get("message") or data.get("detail")
+    if isinstance(err, list):
+        err = "; ".join(str(x) for x in err)
+    err = err or r.text[:400] or f"HTTP {r.status_code}"
+    raise Exception(err)
 
 
 def _usage_terminal_safe_to_clear_client_idempotency_key(status_code, data):
