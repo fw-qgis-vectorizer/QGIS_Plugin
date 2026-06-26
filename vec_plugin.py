@@ -413,8 +413,6 @@ class VecPlugin:
             input_layer = self.dlg.get_input_layer()
             output_name = self.dlg.get_output_layer_name()
             crop_geometry = self.dlg.get_crop_geometry()
-            jwt_token = self.dlg.get_jwt_token()
-            license_key = self.dlg.get_license_key()
             detection_type = self.dlg.get_detection_type()
 
             if not input_layer:
@@ -461,53 +459,31 @@ class VecPlugin:
                 self._is_processing = False
                 return
 
-            trial_receipt = None
-            trial_install_key = None
-            trial_server_id = None
+            from .core.trial_access import shared as trial_shared
 
-            if jwt_token:
-                client = VecInferenceClient(
-                    INFERENCE_BASE_URL,
-                    upload_url=UPLOAD_BASE_URL,
-                    jwt_token=jwt_token,
-                    license_key=license_key,
+            acc = trial_shared()
+            if not self.dlg.get_trial_billable_idempotency_key():
+                acc.get_billable_idempotency_key()
+
+            client, err_msg, usage = acc.build_infer_client_for_large_area(
+                INFERENCE_BASE_URL,
+                upload_url=UPLOAD_BASE_URL,
+            )
+            if not client:
+                if usage:
+                    self.dlg.apply_trial_usage_denied(usage)
+                self.iface.messageBar().pushMessage(
+                    "Error",
+                    (err_msg or "Could not start processing.")[:300],
+                    level=1,
+                    duration=10,
                 )
-            else:
-                from .core.trial_access import shared as trial_shared
+                self._is_processing = False
+                return
 
-                acc = trial_shared()
-                acc.sync_pending_usages()
-                if not self.dlg.get_trial_billable_idempotency_key():
-                    acc.get_billable_idempotency_key()
-
-                ok, msg, usage, trial_receipt = acc.consume_for_large_area_infer()
-                if not ok:
-                    if usage:
-                        self.dlg.apply_trial_usage_denied(usage)
-                    self.iface.messageBar().pushMessage(
-                        "Error",
-                        (msg or "Trial usage failed.")[:300],
-                        level=1,
-                        duration=10,
-                    )
-                    self._is_processing = False
-                    return
-
+            if usage:
+                self.dlg.apply_trial_usage_response(usage)
                 self.dlg.clear_trial_billable_idempotency_key()
-                self.dlg.apply_trial_usage_response(usage or {})
-
-                trial_install_key = acc.install_key
-                trial_server_id = acc.trial_id
-
-                client = VecInferenceClient(
-                    INFERENCE_BASE_URL,
-                    upload_url=UPLOAD_BASE_URL,
-                    jwt_token=None,
-                    license_key=None,
-                    trial_receipt=trial_receipt,
-                    trial_install_key=trial_install_key,
-                    trial_server_id=trial_server_id,
-                )
 
             # Disable Run/Cancel during processing
             self.dlg.runButton.setEnabled(False)

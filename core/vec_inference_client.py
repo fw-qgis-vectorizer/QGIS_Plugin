@@ -181,6 +181,17 @@ class VecInferenceClient:
             and not (self.jwt_token or "").strip()
         )
 
+    def _has_api_auth(self):
+        return bool((self.jwt_token or "").strip()) or self._using_trial_headers()
+
+    def _require_api_auth(self, operation: str):
+        if self._has_api_auth():
+            return
+        raise Exception(
+            f"No authentication for {operation}. "
+            "Validate a paid licence key or wait for trial quota to load, then try again."
+        )
+
     def _get_auth_headers(self):
         """Headers for upload and QGIS API calls (paid: Bearer; trial: X-Trial-* only)."""
         headers = {
@@ -902,6 +913,7 @@ class VecInferenceClient:
         :returns: file_id from upload service
         :rtype: str
         """
+        self._require_api_auth("upload")
         # Validate file exists and is readable
         if not os.path.exists(image_path):
             raise Exception(f"File not found: {image_path}")
@@ -1183,6 +1195,7 @@ class VecInferenceClient:
         :returns: Inference response payload
         :rtype: dict
         """
+        self._require_api_auth("inference")
         if detection_type == "solar_panel":
             # /roofnel is panel-only; backend uses a fixed prompt internally.
             params = None

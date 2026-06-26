@@ -780,60 +780,19 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
         self._clear_overlay_bands()
 
     def _build_auth_client(self):
-        from ..core.vec_inference_client import VecInferenceClient
         from ..core.api_config import INFERENCE_BASE_URL
 
         acc = trial_shared()
-        acc.load_from_settings()
-        acc.sync_pending_usages()
-
-        license_key = (
-            (acc.license_key or "").strip()
-            or self.licensePanel.licenseKeyLineEdit.text().strip()
-        )
-        jwt = (acc.jwt_token or "").strip()
-
-        if license_key or jwt:
-            client = VecInferenceClient(
-                INFERENCE_BASE_URL,
-                jwt_token=jwt or None,
-                license_key=license_key or None,
-            )
-            if license_key:
-                token, expiry = client.validate_license_key(license_key)
-                if token:
-                    acc.set_paid_license(token, license_key, expiry)
-                    client.jwt_token = token
-                    return client, ""
-            elif jwt:
-                return client, ""
-            acc.clear_paid_license()
-
-        if not acc.can_run_large_area():
-            return None, self.tr(
-                "Validate a licence key or activate trial to use Obstacle Removal."
-            )
-
         if not acc.get_billable_idempotency_key():
             acc.get_billable_idempotency_key()
 
-        ok, msg, usage, receipt = acc.consume_for_large_area_infer()
-        if not ok:
-            return None, msg or self.tr("Trial usage denied.")
+        client, err_msg, usage = acc.build_infer_client_for_large_area(INFERENCE_BASE_URL)
+        if not client:
+            return None, err_msg or self.tr("Trial usage denied.")
 
-        acc.clear_billable_idempotency_key()
         if usage:
             acc.apply_server_state(usage)
-        self.licensePanel.refresh_trial_state(force=True)
-
-        client = VecInferenceClient(
-            INFERENCE_BASE_URL,
-            jwt_token=None,
-            license_key=None,
-            trial_receipt=receipt,
-            trial_install_key=acc.install_key,
-            trial_server_id=acc.trial_id,
-        )
+            self.licensePanel.refresh_trial_state(force=True)
         return client, ""
 
     def apply_removals(self):

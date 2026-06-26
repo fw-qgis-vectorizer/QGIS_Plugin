@@ -375,40 +375,16 @@ def normalize_trial_response(data: dict) -> dict:
 
 
 def request_trial_generate(inference_base_url, install_key, timeout=15) -> dict:
-    """Ask the server to issue a new trial for this install_key (must return trial_id)."""
+    """Bootstrap trial for this install_key via GET /qgis/trial/state (server issues trial_id)."""
     if not (install_key or "").strip():
         raise Exception("MISSING_INSTALL_KEY: install_key is required")
 
-    url = ApiRoutes.qgis_trial_generate(inference_base_url)
-    body = {"install_key": install_key.strip()}
-    body.update(client_telemetry())
-    try:
-        r = requests.post(url, json=body, timeout=timeout)
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Trial generate request failed: {e}") from e
-
-    if r.status_code == 404:
-        return fetch_trial_state(
-            inference_base_url, install_key, trial_id=None, timeout=timeout
-        )
-
-    if r.status_code == 503:
-        raise Exception(
-            "Trials are temporarily unavailable (server). Please try again later or use a paid license key."
-        )
-    if r.status_code >= 400:
-        err = _parse_error_body(r)
-        raise Exception(err or f"Trial generate failed (HTTP {r.status_code}).")
-
-    try:
-        data = r.json()
-    except ValueError as e:
-        raise Exception("Trial generate returned invalid JSON.") from e
-
-    data = normalize_trial_response(data)
+    data = fetch_trial_state(
+        inference_base_url, install_key, trial_id=None, timeout=timeout
+    )
     if not trial_id_from_response(data):
         raise Exception(
-            "Trial generate succeeded but the server did not return a trial_id."
+            "Trial bootstrap succeeded but the server did not return a trial_id."
         )
     return data
 

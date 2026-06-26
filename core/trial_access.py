@@ -95,7 +95,10 @@ class TrialAccess:
         trial_helpers.clear_paid_license()
 
     def has_paid_license(self) -> bool:
-        return bool((self.jwt_token or "").strip())
+        """True only when both a stored licence key and JWT exist (validated paid user)."""
+        return bool(
+            (self.jwt_token or "").strip() and (self.license_key or "").strip()
+        )
 
     def trial_can_run(self) -> bool:
         if self.has_paid_license():
@@ -110,9 +113,9 @@ class TrialAccess:
         """Trial may be used after the server returns an active trial for this install/profile."""
         if self.has_paid_license():
             return True
-        if not trial_helpers.is_trial_established():
-            return False
-        if not self.trial_id:
+        if self.trial_id and self.trial_can_run():
+            return True
+        if not trial_helpers.is_trial_established() or not self.trial_id:
             return False
         return self.trial_can_run()
 
@@ -136,10 +139,104 @@ class TrialAccess:
         return rem >= ONE_CLICK_TRIAL_MIN_REMAINING
 
     def can_run_large_area(self) -> bool:
-        """Paid licence or established trial with at least one run remaining."""
+        """Paid licence or active trial with at least one run remaining."""
         if self.has_paid_license():
             return True
+        if self.trial_id and self.trial_can_run():
+            return True
         return self.is_trial_unlocked()
+
+    def prepare_trial_for_billable_run(self, timeout: int = 15) -> tuple[bool, str]:
+        """
+        Sync trial state from the server before billing (GET /qgis/trial/state).
+        Marks the profile established when the server returns a trial_id.
+        """
+        if self.has_paid_license():
+            return True, ""
+        if not self.install_key:
+            return False, "Install key missing. Restart the plugin."
+        if not trial_helpers.network_reachable(timeout=3):
+            return False, "No internet connection. Large area vectorisation requires online trial verification."
+        try:
+            data = trial_helpers.fetch_trial_state(
+                INFERENCE_BASE_URL,
+                self.install_key,
+                trial_id=self.trial_id,
+                timeout=timeout,
+            )
+            self.apply_server_state(data)
+        except Exception as exc:
+            return False, f"Could not load trial status: {exc}"[:500]
+        if self.trial_id:
+            trial_helpers.mark_trial_established()
+        if not self.trial_id:
+            return (
+                False,
+                "Trial quota is not available on this device. Wait for trial status to load or validate a paid licence key.",
+            )
+        if not self.trial_can_run():
+            return False, self._trial_blocked_message()
+        return True, ""
+
+    def _trial_blocked_message(self) -> str:
+        if self.trial_status in ("exhausted", "revoked"):
+            return "No trial runs remaining. Register for a licence at usefieldwatch.com."
+        return "Trial quota is not available. Validate a paid licence key or refresh trial status."
+
+    def build_infer_client_for_large_area(
+        self,
+        service_url: str,
+        upload_url: str | None = None,
+    ) -> tuple[object | None, str, dict | None]:
+        """
+        Build a VecInferenceClient for large-area infer.
+
+        Paid: re-validate licence key and use Bearer auth.
+        Trial: POST /qgis/trial/usage, then attach X-Trial-* headers on all QGIS routes.
+        """
+        from .vec_inference_client import VecInferenceClient
+
+        self.load_from_settings()
+        self.sync_pending_usages()
+
+        license_key = (self.license_key or "").strip()
+        jwt = (self.jwt_token or "").strip()
+
+        if license_key:
+            client = VecInferenceClient(
+                service_url,
+                upload_url=upload_url,
+                jwt_token=jwt or None,
+                license_key=license_key,
+            )
+            token, expiry = client.validate_license_key(license_key)
+            if token:
+                self.set_paid_license(token, license_key, expiry)
+                client.jwt_token = token
+                return client, "", None
+            if jwt:
+                self.clear_paid_license()
+        elif jwt and not license_key:
+            self.clear_paid_license()
+
+        if not self.get_billable_idempotency_key():
+            self.get_billable_idempotency_key()
+
+        ok, msg, usage, receipt = self.consume_for_large_area_infer()
+        if not ok:
+            return None, msg or "Trial usage denied.", usage
+
+        self.clear_billable_idempotency_key()
+        client = VecInferenceClient(
+            service_url,
+            upload_url=upload_url,
+            jwt_token=None,
+            license_key=None,
+            trial_receipt=receipt,
+            trial_install_key=self.install_key,
+            trial_server_id=self.trial_id,
+        )
+        return client, "", usage
 
     def cached_can_export_offline(self) -> bool:
         if self.has_paid_license():
@@ -324,20 +421,9 @@ class TrialAccess:
 
         self.sync_pending_usages()
 
-        if not trial_helpers.is_trial_established() or not self.trial_id:
-            return (
-                False,
-                "Trial quota is not available yet. Open the plugin to auto-activate your trial (or validate a paid licence key).",
-                None,
-                None,
-            )
-        if not self.trial_can_run():
-            return (
-                False,
-                "No trial runs remaining. Register for a licence at usefieldwatch.com.",
-                None,
-                None,
-            )
+        ready, prep_msg = self.prepare_trial_for_billable_run()
+        if not ready:
+            return False, prep_msg, None, None
         if not self.is_online():
             return False, "Large area vectorisation requires an internet connection.", None, None
 

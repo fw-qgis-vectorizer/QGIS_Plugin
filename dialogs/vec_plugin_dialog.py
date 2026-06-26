@@ -552,6 +552,10 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         """Get the JWT token."""
         return self.jwt_token
 
+    def _has_paid_auth(self):
+        """Paid path requires both a validated licence key and JWT in settings."""
+        return bool((self.jwt_token or "").strip() and (self.license_key or "").strip())
+
     def get_install_key(self):
         return self._install_key
 
@@ -560,7 +564,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def trial_can_run(self):
         """True if established trial can start a billable run (paid JWT elsewhere)."""
-        if self.jwt_token:
+        if self._has_paid_auth():
             return False
         return self._trial_acc.is_trial_unlocked()
 
@@ -573,7 +577,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         if not hasattr(self, "getLicenseKeyButton"):
             return
         # Hide CTA while paid or while active trial is available.
-        if self.jwt_token or self.trial_can_run():
+        if self._has_paid_auth() or self.trial_can_run():
             self.getLicenseKeyButton.setVisible(False)
             return
 
@@ -603,7 +607,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.open_fieldwatch_website()
 
     def _update_trial_quota_label(self):
-        if self.jwt_token:
+        if self._has_paid_auth():
             self.trialQuotaLabel.setText(
                 self.tr("Using paid license — runs use your key, not trial quota.")
             )
@@ -642,7 +646,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             self.trial_status in ("exhausted", "revoked")
             or (self.trial_uses_remaining is not None and self.trial_uses_remaining <= 0)
         )
-        show_inputs = (not self.jwt_token) and trial_exhausted
+        show_inputs = (not self._has_paid_auth()) and trial_exhausted
         if hasattr(self, "licenseKeyLineEdit"):
             self.licenseKeyLineEdit.setVisible(show_inputs)
         if hasattr(self, "validateLicenseButton"):
@@ -778,7 +782,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _sync_ok_button_state(self):
         has_polygon = bool(self.crop_geometry and not self.crop_geometry.isEmpty())
-        auth_ok = bool(self.jwt_token) or self.trial_can_run()
+        auth_ok = self._has_paid_auth() or self.trial_can_run()
         set_process_button_enabled(self.runButton, has_polygon and auth_ok)
 
     def apply_trial_usage_denied(self, data):
@@ -1064,7 +1068,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             return
 
         def _run_processing():
-            if not self.jwt_token and not self.trial_can_run():
+            if not self._has_paid_auth() and not self.trial_can_run():
                 QtWidgets.QMessageBox.warning(
                     self,
                     self.tr("License or trial required"),
@@ -1073,7 +1077,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                     ),
                 )
                 return
-            if not self.jwt_token and self.trial_can_run():
+            if not self._has_paid_auth() and self.trial_can_run():
                 self.get_trial_billable_idempotency_key()
             self.processing_started.emit()
             if self.map_tool and self.iface:
