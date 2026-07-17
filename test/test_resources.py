@@ -36,7 +36,7 @@ class VecPluginDialogTest(unittest.TestCase):
         self.assertFalse(icon.isNull())
 
 if __name__ == "__main__":
-    suite = unittest.makeSuite(VecPluginResourcesTest)
+    suite = unittest.makeSuite(VecPluginDialogTest)
     runner = unittest.TextTestRunner(verbosity=2)
     runner.run(suite)
 

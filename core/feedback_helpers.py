@@ -7,7 +7,8 @@ import requests
 from qgis.core import QgsMessageLog, Qgis
 
 from .api_config import ApiRoutes
-from .trial_helpers import client_telemetry
+from .trial_helpers import client_telemetry, client_request_headers
+from .qt_compat import (QgisWarning)
 
 FEEDBACK_MESSAGE_MAX_LEN = 1500
 
@@ -36,7 +37,12 @@ def post_feedback(
     body.update(client_telemetry())
 
     try:
-        r = requests.post(url, json=body, timeout=timeout)
+        r = requests.post(
+            url,
+            json=body,
+            headers=client_request_headers(install_key),
+            timeout=timeout,
+        )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Feedback request failed: {e}") from e
 
@@ -52,5 +58,5 @@ def post_feedback(
     if isinstance(err, list):
         err = "; ".join(str(x) for x in err)
     err = err or r.text[:400] or f"HTTP {r.status_code}"
-    QgsMessageLog.logMessage(f"Feedback HTTP {r.status_code}: {err}", "VEC Plugin", Qgis.Warning)
+    QgsMessageLog.logMessage(f"Feedback HTTP {r.status_code}: {err}", "VEC Plugin", QgisWarning)
     raise Exception(err)

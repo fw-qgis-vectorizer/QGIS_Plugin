@@ -7,7 +7,6 @@ import base64
 import json
 import logging
 import os
-import subprocess  # nosec B404
 import threading
 import time
 
@@ -16,7 +15,7 @@ import numpy as np
 from .model_config import resolve_checkpoint_path, worker_script_basename
 from .one_click_log import sanitize_log_line
 from .model_venv import get_venv_python, venv_exists
-from .subprocess_utils import get_clean_env, popen_hidden
+from .process_runner import PIPE, TimeoutExpired, get_clean_env, popen_hidden
 
 # QgsMessageLog is not thread-safe; stderr drain uses stdlib logging only.
 _worker_stderr_log = logging.getLogger("vec_plugin.model_worker")
@@ -188,9 +187,9 @@ class ModelPredictor:
             cmd = [self.venv_python, self.worker_script]
             self.process = popen_hidden(
                 cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdin=PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
                 text=True,
                 bufsize=1,
                 env=get_clean_env(),
@@ -307,7 +306,7 @@ class ModelPredictor:
             try:
                 self.process.terminate()
                 self.process.wait(timeout=3)
-            except (subprocess.TimeoutExpired, OSError):
+            except (TimeoutExpired, OSError):
                 try:
                     self.process.kill()
                 except OSError:

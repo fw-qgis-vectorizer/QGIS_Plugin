@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import subprocess  # nosec B404
 import sys
 import tarfile
 import tempfile
@@ -24,7 +23,8 @@ from qgis.PyQt.QtNetwork import QNetworkRequest
 
 from .archive_utils import safe_extract_tar
 from .model_config import CACHE_DIR, LOG_CHANNEL, MODEL_MIN_PYTHON
-from .subprocess_utils import get_clean_env, run_hidden
+from .process_runner import TimeoutExpired, get_clean_env, run_hidden
+from .qt_compat import (NetworkNoError, QgisInfo)
 
 # python-build-standalone release (install-only archives).
 RELEASE_TAG = "20251014"
@@ -69,7 +69,7 @@ def verify_standalone_python() -> tuple[bool, str]:
             timeout=60,
             env=get_clean_env(),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, TimeoutExpired) as exc:
         return False, str(exc)
 
     if result.returncode != 0:
@@ -138,7 +138,7 @@ def download_standalone_python(
     QgsMessageLog.logMessage(
         f"Downloading portable Python from {url}",
         LOG_CHANNEL,
-        level=Qgis.MessageLevel.Info,
+        level=QgisInfo,
     )
 
     fd, temp_path = tempfile.mkstemp(suffix=".tar.gz")
@@ -162,7 +162,7 @@ def download_standalone_python(
 
             request = QgsBlockingNetworkRequest()
             err = request.get(QNetworkRequest(qurl))
-            if err == QgsBlockingNetworkRequest.NoError:
+            if err == NetworkNoError:
                 reply = request.reply()
                 content = reply.content()
                 break

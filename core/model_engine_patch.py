@@ -133,7 +133,8 @@ def _patch_position_embedding_sine() -> None:
         precompute_resolution: Optional[int] = None,
     ):
         nn.Module.__init__(self)
-        assert num_pos_feats % 2 == 0, "Expecting even model width"
+        if num_pos_feats % 2 != 0:
+            raise ValueError("Expecting even model width")
         self.num_pos_feats = num_pos_feats // 2
         self.temperature = temperature
         self.normalize = normalize

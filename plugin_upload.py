@@ -15,8 +15,6 @@ defused_xmlrpc.monkey_patch()
 
 import xmlrpc.client  # nosec B411 - patched above via defusedxml.xmlrpc.monkey_patch()
 
-standard_library.install_aliases()
-
 # Configuration
 PROTOCOL = 'https'
 SERVER = 'plugins.qgis.org'

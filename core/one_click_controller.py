@@ -51,6 +51,7 @@ from .one_click_log import sanitize_log_line
 from .model_venv import deps_installed
 from ..ui.one_click_maptool import OneClickMapTool
 from ..ui.one_click_shortcut_filter import OneClickShortcutFilter
+from .qt_compat import (PolygonGeometry, QgisCritical, QgisInfo, QgisSuccess, QgisWarning)
 
 
 class OneClickSegmentationController:
@@ -232,7 +233,7 @@ class OneClickSegmentationController:
         QgsMessageLog.logMessage(
             "Starting segmentation…",
             LOG_CHANNEL,
-            level=Qgis.MessageLevel.Info,
+            level=QgisInfo,
         )
 
         self._init_worker = ModelInitWorker(config)
@@ -257,12 +258,12 @@ class OneClickSegmentationController:
         QgsMessageLog.logMessage(
             "Segmentation ready.",
             LOG_CHANNEL,
-            level=Qgis.MessageLevel.Info,
+            level=QgisInfo,
         )
         self.iface.messageBar().pushMessage(
             "FieldWatch",
             self.settings.tr("One-click segmentation started."),
-            level=Qgis.MessageLevel.Info,
+            level=QgisInfo,
             duration=4,
         )
 
@@ -289,7 +290,7 @@ class OneClickSegmentationController:
         QgsMessageLog.logMessage(
             f"Segmentation startup failed: {safe_message}",
             LOG_CHANNEL,
-            level=Qgis.MessageLevel.Critical,
+            level=QgisCritical,
         )
         QMessageBox.critical(
             self.settings,
@@ -363,7 +364,7 @@ class OneClickSegmentationController:
                 self.iface.messageBar().pushMessage(
                     "FieldWatch",
                     msg,
-                    level=Qgis.MessageLevel.Info,
+                    level=QgisInfo,
                     duration=6,
                 )
         elif not self._trial_session_consumed:
@@ -379,7 +380,7 @@ class OneClickSegmentationController:
                 self.iface.messageBar().pushMessage(
                     "FieldWatch",
                     msg,
-                    level=Qgis.MessageLevel.Info,
+                    level=QgisInfo,
                     duration=6,
                 )
 
@@ -438,7 +439,7 @@ class OneClickSegmentationController:
             self.settings.tr("Saved {n} polygon(s) to '{name}'.").format(
                 n=len(geoms), name=name
             ),
-            level=Qgis.MessageLevel.Success,
+            level=QgisSuccess,
             duration=5,
         )
 
@@ -742,18 +743,18 @@ class OneClickSegmentationController:
                 QgsMessageLog.logMessage(
                     "Segmentation returned an empty mask.",
                     LOG_CHANNEL,
-                    Qgis.MessageLevel.Warning,
+                    QgisWarning,
                 )
         except Exception as exc:
             QgsMessageLog.logMessage(
-                sanitize_log_line(str(exc)), LOG_CHANNEL, Qgis.MessageLevel.Warning
+                sanitize_log_line(str(exc)), LOG_CHANNEL, QgisWarning
             )
 
     def _on_predict_error(self, message):
         self._predicting = False
         self.settings.set_busy(False)
         safe = sanitize_log_line(message)
-        QgsMessageLog.logMessage(safe[:2000], LOG_CHANNEL, Qgis.MessageLevel.Warning)
+        QgsMessageLog.logMessage(safe[:2000], LOG_CHANNEL, QgisWarning)
         self.settings.set_status(self.settings.tr("Prediction failed — see Log Messages."))
         QMessageBox.warning(
             self.settings, self.settings.tr("Error"), safe[:400]
@@ -779,11 +780,12 @@ class OneClickSegmentationController:
         out = []
         for geom in geoms:
             g = QgsGeometry(geom)
+            transformed = True
             try:
                 g.transform(xform)
             except Exception:
-                continue
-            if g and not g.isEmpty():
+                transformed = False
+            if transformed and g and not g.isEmpty():
                 out.append(g)
         return out
 
@@ -805,7 +807,7 @@ class OneClickSegmentationController:
         if not geoms:
             return
         canvas = self.iface.mapCanvas()
-        band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        band = QgsRubberBand(canvas, PolygonGeometry)
         band.setColor(QColor(0, 200, 80, 200))
         band.setFillColor(QColor(0, 200, 80, 80))
         band.setWidth(2)
@@ -813,7 +815,7 @@ class OneClickSegmentationController:
         for geom in geoms:
             if not geom or geom.isEmpty():
                 continue
-            if geom.type() != QgsWkbTypes.PolygonGeometry:
+            if geom.type() != PolygonGeometry:
                 continue
             if geom.isMultipart():
                 for part in geom.asGeometryCollection():

@@ -30,13 +30,14 @@ import traceback
 from urllib.parse import urljoin
 from qgis import processing
 from qgis.core import (
-   QgsMessageLog, Qgis, QgsRasterPipe,
+   QgsMessageLog, QgsRasterPipe,
    QgsRasterFileWriter, QgsRasterLayer, QgsGeometry,
    QgsVectorLayer, QgsFeature, QgsCoordinateTransform, QgsProject, QgsField, QgsApplication
 )
 from qgis.PyQt.QtCore import QVariant
 from .gdal_bootstrap import ensure_gdal_environment
 from .api_config import ApiRoutes
+from .qt_compat import (QgisCritical, QgisInfo, QgisWarning, RasterWriterNoError)
 
 
 # Setup logging for raster cropping operations
@@ -48,6 +49,13 @@ if not logger.hasHandlers():
    formatter = logging.Formatter('%(levelname)s: %(message)s')
    ch.setFormatter(formatter)
    logger.addHandler(ch)
+
+
+def _response_text_snippet(response, limit=500):
+    text = getattr(response, "text", None)
+    if not isinstance(text, str):
+        return ""
+    return text[:limit]
 
 
 
@@ -103,10 +111,10 @@ class VecInferenceClient:
         label = "Raster pipeline"
         if context:
             label = f"Raster pipeline ({context})"
-        QgsMessageLog.logMessage(f"{label}: {summary}", "VEC Plugin", Qgis.Critical)
+        QgsMessageLog.logMessage(f"{label}: {summary}", "VEC Plugin", QgisCritical)
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         tb_sanitized = VecInferenceClient._sanitize_urls(tb, collapse_whitespace=False)
-        QgsMessageLog.logMessage(f"{label} — full traceback:\n{tb_sanitized}", "VEC Plugin", Qgis.Warning)
+        QgsMessageLog.logMessage(f"{label} — full traceback:\n{tb_sanitized}", "VEC Plugin", QgisWarning)
   
     def __init__(
         self,
@@ -117,6 +125,7 @@ class VecInferenceClient:
         trial_receipt=None,
         trial_install_key=None,
         trial_server_id=None,
+        install_key=None,
     ):
         """
         Initialize the inference client.
@@ -135,7 +144,18 @@ class VecInferenceClient:
         self.trial_receipt = trial_receipt
         self.trial_install_key = trial_install_key
         self.trial_server_id = trial_server_id
+        self.install_key = (install_key or trial_install_key or "").strip() or None
+        if not self.install_key:
+            try:
+                from . import trial_helpers
+                self.install_key = trial_helpers.ensure_install_key()
+            except Exception:
+                self.install_key = None
   
+    def _get_client_identity_headers(self):
+        from . import trial_helpers
+        return trial_helpers.client_request_headers(self.install_key)
+
     def validate_license_key(self, license_key):
         """
         Validate license key and get JWT token.
@@ -151,6 +171,7 @@ class VecInferenceClient:
             response = requests.post(
                 auth_endpoint,
                 json={"license_key": license_key},
+                headers=self._get_client_identity_headers(),
                 timeout=10
             )
           
@@ -169,7 +190,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 "License validation failed",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             return None, None
   
@@ -194,9 +215,7 @@ class VecInferenceClient:
 
     def _get_auth_headers(self):
         """Headers for upload and QGIS API calls (paid: Bearer; trial: X-Trial-* only)."""
-        headers = {
-            'User-Agent': 'QGIS-VEC-Plugin/1.0'
-        }
+        headers = self._get_client_identity_headers()
         token = (self.jwt_token or "").strip()
         if token:
             headers['Authorization'] = f'Bearer {token}'
@@ -221,7 +240,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 "JWT token refreshed via /auth/validate after 401.",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
             return True
         return False
@@ -318,7 +337,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 "Raster cropped, compressing for upload...",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
           
             # Export raster to temporary file with hardcoded compression (first compression)
@@ -334,7 +353,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 "Raster compressed and uploading for processing...",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
           
             try:
@@ -346,7 +365,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Upload completed. File ID: {file_id}",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
               
                 if not file_id:
@@ -359,7 +378,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"=== STARTING INFERENCE ===",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
               
                 inference_result = self._start_inference(file_id, detection_type=detection_type)
@@ -402,7 +421,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     "Pulling shapefile...",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
               
                 shapefile_path = self._download_shapefile_from_url(shapefile_target, job_id=job_id)
@@ -415,7 +434,7 @@ class VecInferenceClient:
                     QgsMessageLog.logMessage(
                         f"QGIS JSON download skipped: {self._sanitize_urls(str(json_err))}",
                         "VEC Plugin",
-                        Qgis.Warning
+                        QgisWarning
                     )
 
                 summary_csv_path = None
@@ -432,14 +451,14 @@ class VecInferenceClient:
                         QgsMessageLog.logMessage(
                             f"Panels summary CSV download skipped: {self._sanitize_urls(str(csv_err))}",
                             "VEC Plugin",
-                            Qgis.Warning
+                            QgisWarning
                         )
                         summary_csv_path = None
               
                 QgsMessageLog.logMessage(
                     "Shapefile downloaded successfully",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
               
                 if progress_callback:
@@ -504,7 +523,7 @@ class VecInferenceClient:
         QgsMessageLog.logMessage(
             f"Exporting raster: {width}x{height}, {band_count} band(s)",
             "VEC Plugin",
-            Qgis.Info
+            QgisInfo
         )
       
         # Maximum compression settings:
@@ -562,7 +581,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Compressed raster size: {file_size_mb:.2f} MB",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
               
                 # If file is still very large (>400MB), try resampling to reduce size
@@ -573,7 +592,7 @@ class VecInferenceClient:
                         f"File size ({file_size_mb:.2f} MB) exceeds threshold ({max_file_size_mb} MB). "
                         f"Attempting to resample to reduce size...",
                         "VEC Plugin",
-                        Qgis.Warning
+                        QgisWarning
                     )
                   
                     # Calculate resampling factor to get file under threshold
@@ -587,7 +606,7 @@ class VecInferenceClient:
                         f"Resampling from {width}x{height} to {new_width}x{new_height} "
                         f"(factor: {resample_factor:.2f})",
                         "VEC Plugin",
-                        Qgis.Info
+                        QgisInfo
                     )
                   
                     # Create resampled version using gdal:translate with size reduction
@@ -632,27 +651,31 @@ class VecInferenceClient:
                                    f"Resampled raster size: {resampled_size_mb:.2f} MB "
                                    f"(reduced from {file_size_mb:.2f} MB)",
                                    "VEC Plugin",
-                                   Qgis.Info
+                                   QgisInfo
                                )
                               
                                # Delete original large file
                                try:
                                    os.remove(output_path)
-                               except:
-                                   pass
+                               except OSError as exc:
+                                   QgsMessageLog.logMessage(
+                                       f"Could not remove temporary raster: {exc}",
+                                       "VEC Plugin",
+                                       QgisWarning,
+                                   )
                               
                                output_path = resampled_output
                            else:
                                QgsMessageLog.logMessage(
                                    "Resampling failed, using original compressed file",
                                    "VEC Plugin",
-                                   Qgis.Warning
+                                   QgisWarning
                                )
                         except Exception as resample_error:
                            QgsMessageLog.logMessage(
                                f"Resampling failed: {str(resample_error)}. Using original file.",
                                "VEC Plugin",
-                               Qgis.Warning
+                               QgisWarning
                            )
                            # Continue with original file
                 else:
@@ -665,7 +688,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"GDAL translate failed, trying fallback method: {str(e)}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
           
             # Fallback to direct export (without compression)
@@ -685,7 +708,7 @@ class VecInferenceClient:
                 provider.crs()
             )
           
-            if error != QgsRasterFileWriter.NoError:
+            if error != RasterWriterNoError:
                 raise Exception(f"Failed to write raster: {error}")
           
             # Log fallback file size
@@ -694,7 +717,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Fallback export (no compression) size: {file_size_mb:.2f} MB",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
           
             return temp_path
@@ -736,7 +759,7 @@ class VecInferenceClient:
                         crs_authid = f"EPSG:{epsg_code}"
                     else:
                         crs_authid = raster_crs.toWkt()
-            except:
+            except Exception:
                 crs_authid = raster_crs.toWkt()
           
             mem_layer = QgsVectorLayer(f"Polygon?crs={crs_authid}", "mask", "memory")
@@ -929,7 +952,7 @@ class VecInferenceClient:
         QgsMessageLog.logMessage(
             f"Uploading file: {os.path.basename(image_path)} ({file_size_mb:.2f} MB)",
             "VEC Plugin",
-            Qgis.Info
+            QgisInfo
         )
       
         try:
@@ -969,7 +992,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Upload connection error: {error_msg}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Connection error - server unreachable. Check your internet connection and try again.")
             
@@ -978,7 +1001,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Upload timeout (getting signed URL): {error_msg}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Timeout getting signed URL. Please try again.")
             
@@ -987,23 +1010,19 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Upload request exception (step 1): {error_msg}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception(f"Failed to get signed URL: {type(e).__name__}")
             
             # Check HTTP status code for step 1
             if response.status_code >= 400:
-                error_detail = ""
-                try:
-                    error_detail = response.text[:500]
-                except:
-                    pass
+                error_detail = _response_text_snippet(response, 500)
               
                 sanitized_error = self._sanitize_urls(error_detail)
                 QgsMessageLog.logMessage(
                     f"Upload HTTP error {response.status_code} (getting signed URL): {sanitized_error}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
               
                 if response.status_code == 401:
@@ -1024,7 +1043,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Failed to parse signed URL response JSON: {e}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Upload service returned invalid response. Please try again.")
             
@@ -1036,7 +1055,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Upload response missing signed_url. Response: {self._sanitize_urls(str(result))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Upload service did not return signed_url in response")
             
@@ -1044,7 +1063,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Upload response missing file_id. Response: {self._sanitize_urls(str(result))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Upload service did not return file_id in response")
             
@@ -1072,7 +1091,7 @@ class VecInferenceClient:
                                 QgsMessageLog.logMessage(
                                     f"Upload progress: {percent}% ({uploaded_mb:.2f} MB / {file_size_mb:.2f} MB)",
                                     "VEC Plugin",
-                                    Qgis.Info
+                                    QgisInfo
                                 )
                             yield chunk
                 
@@ -1088,7 +1107,7 @@ class VecInferenceClient:
                     QgsMessageLog.logMessage(
                         f"Upload progress: 100% ({file_size_mb:.2f} MB / {file_size_mb:.2f} MB)",
                         "VEC Plugin",
-                        Qgis.Info
+                        QgisInfo
                     )
             
             except requests.exceptions.ConnectionError as e:
@@ -1096,7 +1115,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"GCS upload connection error: {error_msg}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Connection error uploading to GCS. Check your internet connection and try again.")
             
@@ -1105,7 +1124,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"GCS upload timeout: {error_msg}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception(f"Upload timeout after 600 seconds. File ({file_size_mb:.2f} MB) may be too large or connection too slow. Try again or use a faster connection.")
             
@@ -1114,23 +1133,19 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"GCS upload request exception: {error_msg}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception(f"GCS upload failed: {type(e).__name__}")
             
             # Check HTTP status code for step 2 (GCS upload)
             if upload_response.status_code >= 400:
-                error_detail = ""
-                try:
-                    error_detail = upload_response.text[:500]
-                except:
-                    pass
+                error_detail = _response_text_snippet(upload_response, 500)
               
                 sanitized_error = self._sanitize_urls(error_detail)
                 QgsMessageLog.logMessage(
                     f"GCS upload HTTP error {upload_response.status_code}: {sanitized_error}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
               
                 if upload_response.status_code == 403:
@@ -1151,7 +1166,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Upload request exception (outer catch): {error_msg}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             raise Exception(f"Upload failed: {type(e).__name__}")
           
@@ -1163,7 +1178,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Upload error: {error_msg}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             raise Exception(f"Upload error: {error_msg}")
   
@@ -1216,7 +1231,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Calling inference URL (file_id): {self._sanitize_urls(inference_endpoint)}",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
             
             try:
@@ -1229,27 +1244,27 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"HTTP request completed. Status code: {response.status_code}",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
             except requests.exceptions.Timeout as timeout_err:
                 QgsMessageLog.logMessage(
                     f"Request timed out after 30 seconds: {self._sanitize_urls(str(timeout_err))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise
             except requests.exceptions.ConnectionError as conn_err:
                 QgsMessageLog.logMessage(
                     f"Connection error during request: {self._sanitize_urls(str(conn_err))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise
             
             QgsMessageLog.logMessage(
                 f"Response received. Status code: {response.status_code}",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
             
             # Log response details before raising for status
@@ -1259,13 +1274,13 @@ class VecInferenceClient:
                     QgsMessageLog.logMessage(
                         f"Inference endpoint error response: {self._sanitize_urls(error_detail)}",
                         "VEC Plugin",
-                        Qgis.Warning
+                        QgisWarning
                     )
-                except:
+                except Exception:
                     QgsMessageLog.logMessage(
                         f"Inference endpoint returned error status {response.status_code} but no readable error body",
                         "VEC Plugin",
-                        Qgis.Warning
+                        QgisWarning,
                     )
             
             response.raise_for_status()
@@ -1276,7 +1291,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Failed to parse inference response as JSON: {json_err}. Response text: {response.text[:200]}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception(f"Inference service returned invalid JSON: {json_err}")
             
@@ -1289,7 +1304,7 @@ class VecInferenceClient:
                     f"Inference response missing job_id/outputs.shapefile. Response keys: {list(result.keys())}, "
                     f"Response: {self._sanitize_urls(str(result))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception("Inference service did not return job_id or outputs.shapefile")
             
@@ -1297,13 +1312,13 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Inference job started successfully. Job ID: {job_id}",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
             else:
                 QgsMessageLog.logMessage(
                     "Inference response included direct outputs without a job ID.",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
           
             return result
@@ -1313,7 +1328,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Inference connection error: {error_msg}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             raise Exception(f"Inference connection failed: {error_msg}")
         
@@ -1322,24 +1337,19 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Inference timeout error: {error_msg}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             raise Exception(f"Inference request timed out after 30 seconds: {error_msg}")
         
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code if e.response else None
-            error_detail = ""
-            try:
-                if e.response:
-                    error_detail = e.response.text[:500]
-            except:
-                pass
+            error_detail = _response_text_snippet(e.response, 500) if e.response else ""
             
             sanitized_error = self._sanitize_urls(error_detail)
             QgsMessageLog.logMessage(
                 f"Inference HTTP error {status_code}: {sanitized_error}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             
             if status_code == 401:
@@ -1380,7 +1390,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Inference request exception: {type(e).__name__}: {error_msg}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             raise Exception(f"Inference request failed: {type(e).__name__} - {error_msg}")
         
@@ -1389,7 +1399,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Inference unexpected error: {type(e).__name__}: {error_msg}",
                 "VEC Plugin",
-                Qgis.Warning
+                QgisWarning
             )
             raise Exception(f"Inference error: {error_msg}")
   
@@ -1410,7 +1420,7 @@ class VecInferenceClient:
         QgsMessageLog.logMessage(
             f"Polling status URL (job_id): {self._sanitize_urls(status_endpoint)}",
             "VEC Plugin",
-            Qgis.Info
+            QgisInfo
         )
         start_time = time.time()
       
@@ -1458,7 +1468,7 @@ class VecInferenceClient:
                         QgsMessageLog.logMessage(
                            f"Inference job failed - Server file error: {error_msg}",
                            "VEC Plugin",
-                           Qgis.Warning
+                           QgisWarning
                         )
                         raise Exception(f"Inference job failed: {user_friendly_msg}")
                     else:
@@ -1477,18 +1487,13 @@ class VecInferenceClient:
             except requests.exceptions.HTTPError as e:
                 # Handle HTTP errors (401, 403, 404, 500, etc.)
                 status_code = e.response.status_code if e.response else None
-                error_detail = ""
-                try:
-                    if e.response:
-                        error_detail = e.response.text[:200]  # First 200 chars
-                except:
-                    pass
+                error_detail = _response_text_snippet(e.response, 200) if e.response else ""
               
                 # Log the error for debugging (sanitize URLs)
                 QgsMessageLog.logMessage(
                     f"Status polling HTTP error ({status_code}) on attempt {poll_count}: {self._sanitize_urls(str(e))}. Details: {self._sanitize_urls(error_detail)}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
               
                 # Non-retryable errors (auth, not found, forbidden)
@@ -1521,7 +1526,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Retrying after {wait_time} seconds (error {consecutive_errors}/{max_consecutive_errors})",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
                 time.sleep(wait_time)
                 continue
@@ -1534,7 +1539,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Status polling {error_type} error on attempt {poll_count} (error {consecutive_errors}/{max_consecutive_errors}): {self._sanitize_urls(str(e))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
               
                 if consecutive_errors >= max_consecutive_errors:
@@ -1548,7 +1553,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Retrying after {wait_time} seconds (error {consecutive_errors}/{max_consecutive_errors})",
                     "VEC Plugin",
-                    Qgis.Info
+                    QgisInfo
                 )
                 time.sleep(wait_time)
                 continue
@@ -1559,7 +1564,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Status polling request error on attempt {poll_count} (error {consecutive_errors}/{max_consecutive_errors}): {self._sanitize_urls(str(e))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
               
                 if consecutive_errors >= max_consecutive_errors:
@@ -1575,7 +1580,7 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"Status polling unexpected error on attempt {poll_count}: {self._sanitize_urls(str(e))}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 raise Exception(f"Status polling error: {self._sanitize_urls(str(e))}") from e
   
@@ -1593,7 +1598,7 @@ class VecInferenceClient:
         QgsMessageLog.logMessage(
             f"Downloading shapefile URL (job_id): {self._sanitize_urls(download_endpoint)}",
             "VEC Plugin",
-            Qgis.Info
+            QgisInfo
         )
       
         max_retries = 5  # Keep retries short to avoid long wait loops
@@ -1647,7 +1652,7 @@ class VecInferenceClient:
                     QgsMessageLog.logMessage(
                         f"Waiting for inference to complete (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...",
                         "VEC Plugin",
-                        Qgis.Info
+                        QgisInfo
                     )
                     time.sleep(delay)
                     continue
@@ -1675,7 +1680,7 @@ class VecInferenceClient:
                     QgsMessageLog.logMessage(
                         f"Download connection error (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...",
                         "VEC Plugin",
-                        Qgis.Warning
+                        QgisWarning
                     )
                     time.sleep(delay)
                     continue
@@ -1792,7 +1797,7 @@ class VecInferenceClient:
                     QgsMessageLog.logMessage(
                         "Shapefile target is gs://; auto-falling back to /qgis/download/shapefile/{job_id}.",
                         "VEC Plugin",
-                        Qgis.Warning
+                        QgisWarning
                     )
                     kind = "http"
                     target = fallback_url
@@ -1805,7 +1810,7 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Downloading shapefile URL: {self._sanitize_urls(shapefile_url)}",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
             headers = self._get_auth_headers()
             response = requests.get(shapefile_url, headers=headers, timeout=300, stream=True)
@@ -1820,17 +1825,13 @@ class VecInferenceClient:
                 QgsMessageLog.logMessage(
                     f"QGIS shapefile route returned 404, trying legacy route: {self._sanitize_urls(legacy_url)}",
                     "VEC Plugin",
-                    Qgis.Warning
+                    QgisWarning
                 )
                 response = requests.get(legacy_url, headers=headers, timeout=300, stream=True)
                 if response.status_code == 401 and not _retried and self._try_revalidate_token():
                     return self._download_shapefile_from_url(("http", legacy_url), job_id=job_id, _retried=True)
             if response.status_code is not None and response.status_code >= 400:
-                body = ""
-                try:
-                    body = response.text[:300]
-                except Exception:
-                    pass
+                body = _response_text_snippet(response, 300)
                 raise Exception(
                     f"HTTP {response.status_code} for shapefile URL {self._sanitize_urls(shapefile_url)}. "
                     f"Body: {self._sanitize_urls(body)}"
@@ -1878,18 +1879,14 @@ class VecInferenceClient:
             QgsMessageLog.logMessage(
                 f"Downloading summary CSV URL: {self._sanitize_urls(summary_csv_url)}",
                 "VEC Plugin",
-                Qgis.Info
+                QgisInfo
             )
             headers = self._get_auth_headers()
             response = requests.get(summary_csv_url, headers=headers, timeout=120, stream=True)
             if response.status_code == 401 and not _retried and self._try_revalidate_token():
                 return self._download_summary_csv_from_url(summary_csv_target, _retried=True)
             if response.status_code is not None and response.status_code >= 400:
-                body = ""
-                try:
-                    body = response.text[:300]
-                except Exception:
-                    pass
+                body = _response_text_snippet(response, 300)
                 raise Exception(
                     f"HTTP {response.status_code} for summary CSV URL {self._sanitize_urls(summary_csv_url)}. "
                     f"Body: {self._sanitize_urls(body)}"
@@ -1927,18 +1924,14 @@ class VecInferenceClient:
         QgsMessageLog.logMessage(
             f"Downloading JSON URL (job_id): {self._sanitize_urls(json_url)}",
             "VEC Plugin",
-            Qgis.Info
+            QgisInfo
         )
         headers = self._get_auth_headers()
         response = requests.get(json_url, headers=headers, timeout=120, stream=True)
         if response.status_code == 401 and not _retried and self._try_revalidate_token():
             return self._download_json_from_url(json_target, _retried=True)
         if response.status_code is not None and response.status_code >= 400:
-            body = ""
-            try:
-                body = response.text[:300]
-            except Exception:
-                pass
+            body = _response_text_snippet(response, 300)
             raise Exception(
                 f"HTTP {response.status_code} for JSON URL {self._sanitize_urls(json_url)}. "
                 f"Body: {self._sanitize_urls(body)}"

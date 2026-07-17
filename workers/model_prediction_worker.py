@@ -34,7 +34,7 @@ if sys.platform == "win32":
                 try:
                     os.add_dll_directory(_dll_dir)
                 except OSError:
-                    pass
+                    None
 
 try:
     import numpy as np  # noqa: E402
@@ -284,8 +284,8 @@ def main():
                         sizes = ndimage.sum(mask, labeled, range(1, count + 1))
                         keep = int(np.argmax(sizes)) + 1
                         mask = (labeled == keep).astype(np.uint8)
-                except Exception:
-                    pass
+                except (ImportError, ValueError, TypeError):
+                    None
 
                 payload = {
                     "mask": encode_array(mask),

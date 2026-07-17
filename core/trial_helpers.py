@@ -13,6 +13,7 @@ import requests
 from qgis.core import QgsApplication, QgsMessageLog, QgsSettings, Qgis
 
 from .api_config import ApiRoutes
+from .qt_compat import (QgisInfo, QgisWarning)
 
 
 SETTINGS_GROUP = "vec_plugin"
@@ -77,8 +78,8 @@ def _plugin_version():
                 line = line.strip()
                 if line.startswith("version="):
                     return line.split("=", 1)[1].strip()
-    except Exception:
-        pass
+    except (OSError, UnicodeDecodeError, IndexError):
+        return "unknown"
     return "unknown"
 
 
@@ -96,8 +97,9 @@ def _safe_qgis_version():
             qv = qgis_version_fn() or ""
             if isinstance(qv, str) and qv.strip():
                 return qv.strip()
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError, TypeError):
+            None
+
     inst = getattr(QgsApplication, "instance", lambda: None)()
     if inst is not None:
         inst_fn = getattr(inst, "qgisVersion", None)
@@ -106,14 +108,16 @@ def _safe_qgis_version():
                 qv = inst_fn() or ""
                 if isinstance(qv, str) and qv.strip():
                     return qv.strip()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError, TypeError):
+                None
+
     try:
         qv = str(getattr(Qgis, "QGIS_VERSION", "") or "").strip()
         if qv:
             return qv
-    except Exception:
-        pass
+    except (RuntimeError, AttributeError, TypeError):
+        None
+
     for envk in ("QGIS_VERSION", "RELEASE_NAME"):
         ev = (os.environ.get(envk) or "").strip()
         if ev:
@@ -130,6 +134,35 @@ def client_telemetry():
         }
     except Exception:
         return {"plugin_version": _plugin_version(), "qgis_version": "unknown"}
+
+
+def client_request_headers(install_key=None, extra_headers=None):
+    """
+    Standard client identity headers for all FieldWatch API calls.
+
+    Server analytics stores install_key, plugin/qgis versions per request in Neon.
+    """
+    headers = {"User-Agent": "QGIS-VEC-Plugin/1.0"}
+    ik = (install_key or "").strip()
+    if not ik:
+        try:
+            ik = ensure_install_key()
+        except Exception:
+            ik = ""
+    if ik:
+        headers["X-Install-Key"] = ik
+    tel = client_telemetry()
+    pv = tel.get("plugin_version")
+    qv = tel.get("qgis_version")
+    if pv:
+        headers["X-Plugin-Version"] = str(pv)
+    if qv:
+        headers["X-QGIS-Version"] = str(qv)
+    if extra_headers:
+        for key, value in extra_headers.items():
+            if value is not None and str(value).strip():
+                headers[key] = str(value)
+    return headers
 
 
 def ensure_install_key():
@@ -149,7 +182,7 @@ def ensure_install_key():
         QgsMessageLog.logMessage(
             "Migrated install_key from QSettings to ~/.qgis_fieldwatch/install_key",
             "FieldWatch",
-            Qgis.Info,
+            QgisInfo,
         )
         return legacy
 
@@ -213,6 +246,8 @@ def clear_trial_established() -> None:
 
 _ONBOARDING_COMPLETE_KEY = "onboarding_complete"
 _USER_EMAIL_KEY = "user_email"
+_USER_FIRST_NAME_KEY = "user_first_name"
+_USER_LAST_NAME_KEY = "user_last_name"
 _ONBOARDING_COMPLETED_AT_KEY = "onboarding_completed_at"
 _ONBOARDING_LEGACY_SKIP_KEY = "onboarding_legacy_skip"
 
@@ -237,7 +272,7 @@ def normalize_trial_email(raw_email: str) -> str:
 
 def is_onboarding_complete() -> bool:
     """
-    True when this QGIS profile finished onboarding: terms accepted, email posted,
+    True when this QGIS profile finished onboarding: FieldWatch account created,
     and OK clicked (``onboarding_complete`` + stored email). Legacy upgrades may
     skip without email via ``onboarding_legacy_skip``.
     """
@@ -270,15 +305,43 @@ def get_stored_user_email() -> str:
     return email.strip()
 
 
-def save_onboarding(email: str) -> None:
-    """Persist onboarding completion after successful POST /qgis/trial."""
+def get_stored_user_first_name() -> str:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    value = s.value(_USER_FIRST_NAME_KEY, "", type=str) or ""
+    s.endGroup()
+    return value.strip()
+
+
+def get_stored_user_last_name() -> str:
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    value = s.value(_USER_LAST_NAME_KEY, "", type=str) or ""
+    s.endGroup()
+    return value.strip()
+
+
+def get_stored_onboarding_contact() -> dict[str, str]:
+    return {
+        "email": get_stored_user_email(),
+        "first_name": get_stored_user_first_name(),
+        "last_name": get_stored_user_last_name(),
+    }
+
+
+def save_onboarding(email: str, *, first_name: str = "", last_name: str = "") -> None:
+    """Persist onboarding completion after successful FieldWatch account registration."""
     from datetime import datetime, timezone
 
     email = normalize_trial_email(email)
+    fn = (first_name or "").strip()
+    ln = (last_name or "").strip()
     completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     s = QgsSettings()
     s.beginGroup(SETTINGS_GROUP)
     s.setValue(_USER_EMAIL_KEY, email)
+    s.setValue(_USER_FIRST_NAME_KEY, fn)
+    s.setValue(_USER_LAST_NAME_KEY, ln)
     s.setValue(_ONBOARDING_COMPLETE_KEY, True)
     s.setValue(_ONBOARDING_COMPLETED_AT_KEY, completed_at)
     s.remove(_ONBOARDING_LEGACY_SKIP_KEY)
@@ -380,7 +443,11 @@ def request_trial_generate(inference_base_url, install_key, timeout=15) -> dict:
         raise Exception("MISSING_INSTALL_KEY: install_key is required")
 
     data = fetch_trial_state(
-        inference_base_url, install_key, trial_id=None, timeout=timeout
+        inference_base_url,
+        install_key,
+        trial_id=None,
+        timeout=timeout,
+        include_stored_contact=True,
     )
     if not trial_id_from_response(data):
         raise Exception(
@@ -389,10 +456,48 @@ def request_trial_generate(inference_base_url, install_key, timeout=15) -> dict:
     return data
 
 
-def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5):
+def _contact_query_params(
+    *,
+    email: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+) -> dict[str, str]:
+    params: dict[str, str] = {}
+    addr = normalize_trial_email(email or "")
+    if addr:
+        params["email"] = addr
+    fn = (first_name or "").strip()
+    if fn:
+        params["first_name"] = fn
+    ln = (last_name or "").strip()
+    if ln:
+        params["last_name"] = ln
+    return params
+
+
+def fetch_trial_state(
+    inference_base_url,
+    install_key,
+    trial_id=None,
+    timeout=5,
+    *,
+    email=None,
+    first_name=None,
+    last_name=None,
+    include_stored_contact=False,
+):
     """Read trial quota from the server (never decrements uses)."""
     if not (install_key or "").strip():
         raise Exception("MISSING_INSTALL_KEY: install_key is required")
+
+    if include_stored_contact:
+        stored = get_stored_onboarding_contact()
+        if email is None:
+            email = stored.get("email")
+        if first_name is None:
+            first_name = stored.get("first_name")
+        if last_name is None:
+            last_name = stored.get("last_name")
 
     params = {"install_key": install_key.strip()}
     tid = (trial_id or "").strip()
@@ -404,9 +509,20 @@ def fetch_trial_state(inference_base_url, install_key, trial_id=None, timeout=5)
             # Ignore corrupt stored trial_id; bootstrap by install_key only.
             pass
     params.update(client_telemetry())
+    params.update(
+        _contact_query_params(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+        )
+    )
     url = f"{ApiRoutes.qgis_trial_state(inference_base_url)}?{urlencode(params)}"
     try:
-        r = requests.get(url, timeout=timeout)
+        r = requests.get(
+            url,
+            headers=client_request_headers(install_key),
+            timeout=timeout,
+        )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Trial status request failed: {e}") from e
 
@@ -450,13 +566,22 @@ def post_trial_email(
     if ensure_trial_id and not tid:
         try:
             state = fetch_trial_state(
-                inference_base_url, key, trial_id=None, timeout=timeout
+                inference_base_url,
+                key,
+                trial_id=None,
+                timeout=timeout,
+                email=addr,
+                include_stored_contact=True,
             )
             tid = trial_id_from_response(state)
             if tid:
                 set_stored_trial_id(tid)
-        except Exception:
-            pass
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+            QgsMessageLog.logMessage(
+                f"Trial state refresh skipped after email signup: {exc}",
+                "VEC Plugin",
+                QgisInfo,
+            )
 
     url = ApiRoutes.qgis_trial_email(inference_base_url)
     body = {
@@ -468,7 +593,12 @@ def post_trial_email(
     body.update(client_telemetry())
 
     try:
-        r = requests.post(url, json=body, timeout=timeout)
+        r = requests.post(
+            url,
+            json=body,
+            headers=client_request_headers(key),
+            timeout=timeout,
+        )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Email signup request failed: {e}") from e
 
@@ -667,7 +797,12 @@ def post_trial_usage(
     )
     for attempt in range(attempts):
         try:
-            r = requests.post(url, json=body, timeout=timeout)
+            r = requests.post(
+                url,
+                json=body,
+                headers=client_request_headers(install_key),
+                timeout=timeout,
+            )
         except _retryable_post as e:
             if attempt + 1 < attempts:
                 time.sleep(1.0 * (attempt + 1))
@@ -691,7 +826,7 @@ def post_trial_usage(
                 time.sleep(1.0 * (attempt + 1))
                 continue
             err = _parse_error_body_from_dict(data) or f"HTTP {r.status_code}"
-            QgsMessageLog.logMessage(f"Trial usage error: {err}", "VEC Plugin", Qgis.Warning)
+            QgsMessageLog.logMessage(f"Trial usage error: {err}", "VEC Plugin", QgisWarning)
             raise Exception(err)
 
         # 4xx: explicit denial with allowed == false → definitive; keep other 4xx as errors.
@@ -699,7 +834,7 @@ def post_trial_usage(
             if data.get("allowed") is False:
                 return data, _usage_terminal_safe_to_clear_client_idempotency_key(r.status_code, data)
             err = _parse_error_body_from_dict(data) or f"HTTP {r.status_code}"
-            QgsMessageLog.logMessage(f"Trial usage error: {err}", "VEC Plugin", Qgis.Warning)
+            QgsMessageLog.logMessage(f"Trial usage error: {err}", "VEC Plugin", QgisWarning)
             raise Exception(err)
 
         return data, _usage_terminal_safe_to_clear_client_idempotency_key(r.status_code, data)

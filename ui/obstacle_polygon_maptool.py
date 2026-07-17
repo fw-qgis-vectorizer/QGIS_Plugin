@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
+from qgis.core import QgsGeometry, QgsPointXY
 from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtGui import QColor, QCursor
 
-from ..core.qt_compat import CrossCursor, LeftButton, RightButton
+from ..core.qt_compat import CrossCursor, LeftButton, LineGeometry, PolygonGeometry
 from .space_pan_mixin import SpacePanMixin
 
 
@@ -56,7 +56,7 @@ class ObstaclePolygonMapTool(SpacePanMixin, QgsMapTool):
             return
         self._points.append(QgsPointXY(self.toMapCoordinates(event.pos())))
         if self._band is None:
-            self._band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            self._band = QgsRubberBand(self.canvas, PolygonGeometry)
             self._band.setColor(self._LINE)
             self._band.setFillColor(self._FILL)
             self._band.setWidth(2)
@@ -68,7 +68,7 @@ class ObstaclePolygonMapTool(SpacePanMixin, QgsMapTool):
     def _update_band(self):
         if not self._band or len(self._points) < 2:
             return
-        self._band.reset(QgsWkbTypes.PolygonGeometry)
+        self._band.reset(PolygonGeometry)
         for pt in self._points:
             self._band.addPoint(pt, False)
         self._band.addPoint(self._points[0], True)
@@ -76,13 +76,13 @@ class ObstaclePolygonMapTool(SpacePanMixin, QgsMapTool):
     def _reset_drawing(self):
         self._points.clear()
         if self._band:
-            self._band.reset(QgsWkbTypes.PolygonGeometry)
+            self._band.reset(PolygonGeometry)
 
     def deactivate(self):
         self._reset_drawing()
         if self._band:
             try:
-                self._band.reset(QgsWkbTypes.LineGeometry)
+                self._band.reset(LineGeometry)
                 self._band.setVisible(False)
             except RuntimeError:
                 pass

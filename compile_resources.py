@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 import sys
 
 PLUGIN_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -34,7 +33,12 @@ def main() -> int:
         return 1
 
     print(f"Using {pyrcc}")
-    subprocess.check_call([pyrcc, "-o", OUT, QRC])
+    from core.process_runner import check_call
+
+    if os.path.basename(pyrcc) not in ("pyrcc5", "pyrcc6"):
+        print(f"error: unexpected pyrcc executable: {pyrcc}", file=sys.stderr)
+        return 1
+    check_call([pyrcc, "-o", OUT, QRC])
 
     with open(OUT, encoding="utf-8") as f:
         text = f.read()

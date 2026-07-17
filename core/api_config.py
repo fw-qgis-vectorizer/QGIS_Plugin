@@ -3,6 +3,9 @@
 
 INFERENCE_BASE_URL = "https://inference.usefieldwatch.com/"
 UPLOAD_BASE_URL = "https://upload.usefieldwatch.com/"
+FIELDWATCH_GET_LICENCE_URL = "https://usefieldwatch.com/pricing"
+FIELDWATCH_REGISTER_URL = "https://usefieldwatch.com/api/auth/register"
+FIELDWATCH_REGISTER_QGIS_URL = "https://usefieldwatch.com/auth/register/qgis"
 
 
 def _join_url(base: str, *segments: str) -> str:

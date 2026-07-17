@@ -8,7 +8,7 @@ name=FieldWatch Vectorizer
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=One-Click and large area vectorization inference service for building detection, drone imagery ordering.
-version=5.0.1
+version=5.0.4
 author=FieldWatch
 email=support@usefieldwatch.com
 

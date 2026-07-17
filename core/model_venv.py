@@ -6,7 +6,6 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import subprocess  # nosec B404
 import sys
 import tempfile
 from typing import Callable
@@ -29,8 +28,9 @@ from .one_click_python import (
     standalone_python_exists,
     verify_standalone_python,
 )
+from .process_runner import PIPE, STDOUT, TimeoutExpired, get_clean_env, popen_hidden, run_hidden
 from .safe_http import GET_PIP_DOWNLOAD_HOSTS, download_https_to_file
-from .subprocess_utils import get_clean_env, popen_hidden, run_hidden
+from .qt_compat import (QgisCritical, QgisInfo)
 
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
@@ -65,7 +65,7 @@ def _python_version_tuple(exe: str) -> tuple[int, int] | None:
             timeout=30,
             env=get_clean_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
@@ -95,7 +95,7 @@ def _iter_system_python_candidates():
                     timeout=30,
                     env=get_clean_env(),
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, TimeoutExpired):
                 continue
             if result.returncode == 0:
                 line = result.stdout.strip().splitlines()[-1] if result.stdout else ""
@@ -117,7 +117,7 @@ def _iter_system_python_candidates():
                     timeout=30,
                     env=get_clean_env(),
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, TimeoutExpired):
                 continue
             if result.returncode == 0:
                 line = result.stdout.strip().splitlines()[-1] if result.stdout else ""
@@ -179,7 +179,7 @@ def _venv_has_pip() -> bool:
             env=get_clean_env(),
         )
         return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, TimeoutExpired):
         return False
 
 
@@ -246,7 +246,7 @@ def _bootstrap_pip(venv_py: str, base_py: str) -> tuple[bool, str]:
                 timeout=180,
                 env=env,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, TimeoutExpired) as exc:
             continue
         if result.returncode == 0 and _venv_has_pip():
             return True, ""
@@ -307,7 +307,7 @@ def _create_venv(base: str) -> tuple[bool, str]:
                 timeout=300,
                 env=env,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, TimeoutExpired) as exc:
             last_error = str(exc)
             remove_venv()
             continue
@@ -368,7 +368,7 @@ def _verify_deps_import() -> tuple[bool, str]:
             timeout=300,
             env=get_clean_env(),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, TimeoutExpired) as exc:
         return False, str(exc)
 
     if result.returncode == 0:
@@ -377,6 +377,15 @@ def _verify_deps_import() -> tuple[bool, str]:
     detail = (result.stderr or result.stdout or "Import verification failed.").strip()
     tail = "\n".join(detail.splitlines()[-12:])
     return False, tail or detail
+
+
+def _close_stream_quietly(stream) -> None:
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except OSError:
+        return
 
 
 def _run_pip(
@@ -391,8 +400,8 @@ def _run_pip(
         try:
             proc = popen_hidden(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=PIPE,
+                stderr=STDOUT,
                 text=True,
                 env=get_clean_env(),
             )
@@ -421,16 +430,9 @@ def _run_pip(
         return True, "Dependencies installed."
     finally:
         if proc is not None:
-            if proc.stdout is not None:
-                try:
-                    proc.stdout.close()
-                except Exception:
-                    pass
+            _close_stream_quietly(proc.stdout)
             if proc.stderr is not None and proc.stderr is not proc.stdout:
-                try:
-                    proc.stderr.close()
-                except Exception:
-                    pass
+                _close_stream_quietly(proc.stderr)
 
 
 def _ensure_base_python(
@@ -521,7 +523,7 @@ def create_venv_and_install(
         QgsMessageLog.logMessage(
             "Segmentation dependencies installed.",
             LOG_CHANNEL,
-            level=Qgis.MessageLevel.Info,
+            level=QgisInfo,
         )
         return True, "Dependencies installed successfully."
 
@@ -529,7 +531,7 @@ def create_venv_and_install(
     QgsMessageLog.logMessage(
         f"Segmentation dependency verification failed:\n{safe_detail}",
         LOG_CHANNEL,
-        level=Qgis.MessageLevel.Critical,
+        level=QgisCritical,
     )
     return False, (
         "Install finished but the segmentation engine could not be imported.\n\n"

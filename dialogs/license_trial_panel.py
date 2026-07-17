@@ -9,14 +9,11 @@ from qgis.PyQt import QtWidgets, QtCore, QtGui
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtGui import QDesktopServices
 
-from ..core.api_config import INFERENCE_BASE_URL
+from ..core.api_config import INFERENCE_BASE_URL, FIELDWATCH_GET_LICENCE_URL
 from ..core import trial_helpers
 from ..core.qt_compat import LineEditPassword, SizePolicyExpanding, SizePolicyFixed
 from ..core.trial_access import shared as trial_shared, ONE_CLICK_TRIAL_MIN_REMAINING
 from ..core.trial_workers import TrialGenerateWorker, TrialStateFetchWorker
-
-FIELDWATCH_HOME_URL = "https://usefieldwatch.com/"
-
 
 class LicenseTrialPanel(QtWidgets.QGroupBox):
     """Licence key, validate, and trial quota display (auto trial bootstrap)."""
@@ -64,8 +61,12 @@ class LicenseTrialPanel(QtWidgets.QGroupBox):
             self._acc.trial_status is None
             and self._acc.uses_remaining is None
         ):
-            self.licenseStatusLabel.setText(self.tr("Loading trial status…"))
-            self.licenseStatusLabel.setStyleSheet("color: blue;")
+            if self._trial_quota_spinner.isVisible():
+                self.licenseStatusLabel.setText(self.tr("Loading trial status…"))
+                self.licenseStatusLabel.setStyleSheet("color: blue;")
+            else:
+                self.licenseStatusLabel.setText(self.tr("Not validated"))
+                self.licenseStatusLabel.setStyleSheet("color: gray;")
         elif self._acc.trial_status == "exhausted":
             self.licenseStatusLabel.setText(self.tr("Trial exhausted"))
             self.licenseStatusLabel.setStyleSheet("color: red;")
@@ -209,6 +210,11 @@ class LicenseTrialPanel(QtWidgets.QGroupBox):
             if self._trial_quota_spinner.isVisible():
                 self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
                 self.trialQuotaLabel.setStyleSheet("color: blue;")
+            elif not trial_helpers.is_trial_established():
+                self.trialQuotaLabel.setText(
+                    self.tr("Trial not started — open the main FieldWatch dialog to activate.")
+                )
+                self.trialQuotaLabel.setStyleSheet("color: orange;")
             else:
                 self.trialQuotaLabel.setText("")
                 self.trialQuotaLabel.setStyleSheet("color: gray;")
@@ -392,7 +398,7 @@ class LicenseTrialPanel(QtWidgets.QGroupBox):
     def _on_generate_trial_clicked(self):
         # UX: "Get Licence" only (trial is auto-bootstrapped on first open).
         if self._allow_get_licence:
-            QDesktopServices.openUrl(QUrl(FIELDWATCH_HOME_URL))
+            QDesktopServices.openUrl(QUrl(FIELDWATCH_GET_LICENCE_URL))
 
     def validate_license(self):
         license_key = self.licenseKeyLineEdit.text().strip()

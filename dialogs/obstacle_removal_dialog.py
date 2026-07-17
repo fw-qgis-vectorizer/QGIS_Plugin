@@ -11,7 +11,6 @@ from qgis.core import (
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
-    QgsWkbTypes,
 )
 from qgis.gui import QgsRubberBand
 from qgis.PyQt import QtWidgets, QtCore
@@ -24,7 +23,17 @@ from ..core.obstacle_edit_config import (
     build_edit_prompt,
 )
 from ..core.qgis_layer_utils import layer_is_usable, list_project_raster_layers
-from ..core.qt_compat import AlignCenter, CheckStateChecked, ItemDataUserRole, dialog_exec
+from ..core.qt_compat import (
+    AlignCenter,
+    CheckStateChecked,
+    ItemDataUserRole,
+    MsgBoxNo,
+    MsgBoxYes,
+    PolygonGeometry,
+    TableNoEditTriggers,
+    TableSelectRows,
+    dialog_exec,
+)
 from ..core.trial_access import shared as trial_shared
 from ..core import trial_helpers
 from ..core.obstacle_crop import (
@@ -86,6 +95,18 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
         self.populate_layers()
         self._sync_apply_state()
         self._install_shortcut_filter()
+
+    def showEvent(self, event):
+        """Sync licence/trial display from shared profile state on open."""
+        super().showEvent(event)
+        self.licensePanel._acc.load_from_settings()
+        self.licensePanel._sync_from_access()
+        if (
+            not self.licensePanel._acc.has_paid_license()
+            and self.licensePanel._acc.uses_remaining is None
+            and self.licensePanel._acc.trial_status is None
+        ):
+            self.licensePanel.refresh_trial_state(force=True)
 
     def _active_map_tool(self):
         canvas = self.iface.mapCanvas() if self.iface else None
@@ -212,8 +233,8 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
             ]
         )
         self.boxTable.horizontalHeader().setStretchLastSection(True)
-        self.boxTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.boxTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.boxTable.setSelectionBehavior(TableSelectRows)
+        self.boxTable.setEditTriggers(TableNoEditTriggers)
         obstacle_layout.addWidget(self.boxTable)
 
         self.boxCountLabel = QtWidgets.QLabel(self.tr("0 obstacles selected"))
@@ -268,8 +289,8 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
             ]
         )
         self.solarTable.horizontalHeader().setStretchLastSection(True)
-        self.solarTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.solarTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.solarTable.setSelectionBehavior(TableSelectRows)
+        self.solarTable.setEditTriggers(TableNoEditTriggers)
         solar_layout.addWidget(self.solarTable)
 
         self.solarCountLabel = QtWidgets.QLabel(self.tr("0 roof area(s) selected"))
@@ -532,7 +553,7 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
         canvas = self.iface.mapCanvas()
         if not canvas:
             return
-        band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        band = QgsRubberBand(canvas, PolygonGeometry)
         if solar:
             band.setColor(self._SOLAR_LINE)
             band.setFillColor(self._SOLAR_FILL)
@@ -1164,10 +1185,10 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
                 self,
                 self.tr("Obstacle Removal"),
                 self.tr("A task is in progress. Cancel and go back?"),
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
+                MsgBoxYes | MsgBoxNo,
+                MsgBoxNo,
             )
-            if reply != QtWidgets.QMessageBox.Yes:
+            if reply != MsgBoxYes:
                 return
             if self._worker and self._worker.isRunning():
                 self._worker.cancel()
@@ -1254,10 +1275,10 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
                 self,
                 self.tr("AI Imagery Edit"),
                 self.tr("A task is in progress. Cancel and close?"),
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
+                MsgBoxYes | MsgBoxNo,
+                MsgBoxNo,
             )
-            if reply != QtWidgets.QMessageBox.Yes:
+            if reply != MsgBoxYes:
                 event.ignore()
                 return
         self.shutdown()

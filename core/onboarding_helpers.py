@@ -8,6 +8,7 @@ from typing import Callable
 from qgis.PyQt import QtWidgets
 
 from .api_config import INFERENCE_BASE_URL
+from .account_register import DEFAULT_REASON_FOR_USE, registration_form_tooltip
 from . import trial_helpers
 
 ONBOARDING_REQUIRED_TOOLTIP = (
@@ -20,15 +21,12 @@ def onboarding_required_tooltip() -> str:
 
 
 def onboarding_ok_tooltip(email_text: str, terms_accepted: bool) -> str:
-    """Tooltip for the welcome dialog OK button when it stays disabled."""
-    email = (email_text or "").strip()
-    if not email:
-        return "Please enter your email address."
-    if not trial_helpers.is_valid_email(email):
-        return "Please enter a valid email address."
-    if not terms_accepted:
-        return "You must accept the terms and conditions."
-    return ""
+    """Backward-compatible tooltip helper (email-only forms)."""
+    return registration_form_tooltip(
+        email=email_text,
+        terms_accepted=terms_accepted,
+        reason_for_use=DEFAULT_REASON_FOR_USE,
+    )
 
 
 def set_process_button_enabled(button, would_enable: bool) -> bool:
@@ -57,7 +55,7 @@ def _resolve_trial_id(trial_id=None):
 
 def _show_onboarding_dialog(parent, install_key, inference_base_url, trial_id=None):
     from ..dialogs.onboarding_dialog import OnboardingDialog
-    from .qt_compat import dialog_exec
+    from .qt_compat import dialog_exec, DialogAccepted
 
     dlg = OnboardingDialog(
         parent=parent,
@@ -65,7 +63,7 @@ def _show_onboarding_dialog(parent, install_key, inference_base_url, trial_id=No
         inference_base_url=inference_base_url,
         trial_id=_resolve_trial_id(trial_id),
     )
-    return dialog_exec(dlg) == dlg.Accepted
+    return dialog_exec(dlg) == DialogAccepted
 
 
 def _finish_onboarding(

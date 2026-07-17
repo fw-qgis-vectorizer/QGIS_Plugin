@@ -8,7 +8,7 @@ import os
 import time
 from typing import Callable
 
-from qgis.core import Qgis, QgsMessageLog
+from qgis.core import QgsMessageLog
 
 from .model_config import (
     LOG_CHANNEL,
@@ -22,6 +22,7 @@ from .safe_http import (
     HttpsDownloadResponse,
     UnsafeDownloadURLError,
 )
+from .qt_compat import QgisWarning
 
 _CHUNK_BYTES = 1024 * 1024
 _MIN_CHECKPOINT_BYTES = 1_000_000
@@ -182,7 +183,7 @@ def download_checkpoint(
     QgsMessageLog.logMessage(
         f"Weight download failed: {safe_msg}",
         LOG_CHANNEL,
-        Qgis.MessageLevel.Warning,
+        QgisWarning,
     )
     return (
         False,

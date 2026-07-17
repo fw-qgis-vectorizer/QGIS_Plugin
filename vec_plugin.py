@@ -22,14 +22,14 @@
 """
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QDialog
+from qgis.PyQt.QtWidgets import QAction
 from qgis.core import (
     QgsVectorLayer, QgsProject, QgsMessageLog,
-    QgsDistanceArea, Qgis
+    QgsDistanceArea,
 )
 
 # Initialize Qt resources (resources/resources.py via resources package)
-from .resources import *
+from . import resources  # noqa: F401
 from .dialogs.vec_plugin_dialog import VecPluginDialog
 from .dialogs.order_imagery_dialog import OrderImageryDialog
 from .dialogs.one_click_settings_dialog import OneClickSettingsDialog
@@ -37,8 +37,16 @@ from .dialogs.obstacle_removal_dialog import ObstacleRemovalDialog
 from .core.one_click_controller import OneClickSegmentationController
 from .core.vec_inference_client import VecInferenceClient
 from .core.api_config import INFERENCE_BASE_URL, UPLOAD_BASE_URL
-from .core.qt_compat import dialog_exec
+from .core.qt_compat import (
+    dialog_exec,
+    DialogAccepted,
+    safe_disconnect,
+    QgisCritical,
+    QgisInfo,
+    QgisWarning,
+)
 from .core import trial_helpers
+import os
 import os.path
 import tempfile
 import uuid
@@ -238,16 +246,19 @@ class VecPlugin:
                 self.obstacle_removal_dlg.shutdown()
                 self.obstacle_removal_dlg.hide()
             except RuntimeError:
-                pass
+                None
             self.obstacle_removal_dlg = None
         self.one_click_dlg = None
         self.one_click_controller = None
         if self._segmentation_predictor is not None:
             try:
                 self._segmentation_predictor.cleanup()
-            except Exception:
-                pass
-            self._segmentation_predictor = None
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f"Segmentation predictor cleanup: {exc}",
+                    "VEC Plugin",
+                    QgisWarning,
+                )
         self._segmentation_preload_worker = None
         self._segmentation_preloading = False
         for action in self.actions:
@@ -262,18 +273,12 @@ class VecPlugin:
 
         # Create the dialog with elements (after translation) and keep reference
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
+        if self.first_start:
             self.first_start = False
             self.dlg = VecPluginDialog(iface=self.iface)
-            try:
-                self.dlg.one_click_requested.disconnect()
-            except Exception:
-                pass
+            safe_disconnect(self.dlg.one_click_requested)
             self.dlg.one_click_requested.connect(self.run_one_click_segmentation)
-            try:
-                self.dlg.obstacle_removal_requested.disconnect()
-            except Exception:
-                pass
+            safe_disconnect(self.dlg.obstacle_removal_requested)
             self.dlg.obstacle_removal_requested.connect(self.run_obstacle_removal)
 
         QTimer.singleShot(0, self._preload_segmentation_model)
@@ -285,10 +290,7 @@ class VecPlugin:
         self._is_processing = False
         
         # Connect to processing_started signal (disconnect first to avoid duplicates)
-        try:
-            self.dlg.processing_started.disconnect()
-        except:
-            pass
+        safe_disconnect(self.dlg.processing_started)
         self.dlg.processing_started.connect(self._start_processing)
 
         # show the dialog (non-modal so it stays open during processing)
@@ -336,7 +338,7 @@ class VecPlugin:
         self.iface.messageBar().pushMessage(
             "FieldWatch",
             self.tr("First startup can take about a minute (background)…"),
-            level=Qgis.MessageLevel.Info,
+            level=QgisInfo,
             duration=5,
         )
 
@@ -349,7 +351,7 @@ class VecPlugin:
         QgsMessageLog.logMessage(
             "Segmentation ready (background startup complete).",
             "FieldWatch One-Click",
-            Qgis.MessageLevel.Info,
+            QgisInfo,
         )
 
     def _on_segmentation_preload_error(self, message: str):
@@ -357,7 +359,7 @@ class VecPlugin:
         QgsMessageLog.logMessage(
             f"Segmentation preload failed: {message}",
             "FieldWatch One-Click",
-            Qgis.MessageLevel.Warning,
+            QgisWarning,
         )
 
     def run_one_click_segmentation(self):
@@ -404,10 +406,7 @@ class VecPlugin:
             self._is_processing = True
             
             # Disconnect signal to prevent restart
-            try:
-                self.dlg.processing_started.disconnect()
-            except:
-                pass
+            safe_disconnect(self.dlg.processing_started)
             
             # Get values from dialog
             input_layer = self.dlg.get_input_layer()
@@ -521,12 +520,9 @@ class VecPlugin:
         except Exception as e:
             # Clean up any partially created worker
             if hasattr(self, 'worker') and self.worker:
-                try:
-                    self.worker.progress.disconnect()
-                    self.worker.finished.disconnect()
-                    self.worker.error.disconnect()
-                except:
-                    pass
+                safe_disconnect(self.worker.progress)
+                safe_disconnect(self.worker.finished)
+                safe_disconnect(self.worker.error)
                 self.worker = None
             
             self._is_processing = False
@@ -536,10 +532,7 @@ class VecPlugin:
             self.dlg.cancelButton.setEnabled(True)
             
             # Reconnect processing signal
-            try:
-                self.dlg.processing_started.disconnect()
-            except:
-                pass
+            safe_disconnect(self.dlg.processing_started)
             self.dlg.processing_started.connect(self._start_processing)
             
             self.iface.messageBar().pushMessage(
@@ -610,17 +603,14 @@ class VecPlugin:
             self._is_processing = False
             
             # Close dialog after a short delay (use done() to avoid triggering accept() signal)
-            QTimer.singleShot(1000, lambda: self.dlg.done(QDialog.Accepted))
+            QTimer.singleShot(1000, lambda: self.dlg.done(DialogAccepted))
             
         except Exception as e:
             # Ensure cleanup happens
             if hasattr(self, 'worker') and self.worker:
-                try:
-                    self.worker.progress.disconnect()
-                    self.worker.finished.disconnect()
-                    self.worker.error.disconnect()
-                except:
-                    pass
+                safe_disconnect(self.worker.progress)
+                safe_disconnect(self.worker.finished)
+                safe_disconnect(self.worker.error)
             self._is_processing = False
             self._on_error(str(e))
     
@@ -629,13 +619,9 @@ class VecPlugin:
         try:
             # Clean up worker thread
             if hasattr(self, 'worker') and self.worker:
-                try:
-                    # Disconnect all signals first
-                    self.worker.progress.disconnect()
-                    self.worker.finished.disconnect()
-                    self.worker.error.disconnect()
-                except:
-                    pass
+                safe_disconnect(self.worker.progress)
+                safe_disconnect(self.worker.finished)
+                safe_disconnect(self.worker.error)
                 
                 # Wait for thread to finish (with timeout)
                 if self.worker.isRunning():
@@ -666,10 +652,7 @@ class VecPlugin:
             self.dlg.cancelButton.setEnabled(True)
             
             # Reconnect processing signal to allow retry
-            try:
-                self.dlg.processing_started.disconnect()
-            except:
-                pass
+            safe_disconnect(self.dlg.processing_started)
             self.dlg.processing_started.connect(self._start_processing)
             
         except Exception as e:
@@ -683,7 +666,7 @@ class VecPlugin:
             QgsMessageLog.logMessage(
                 f"Error in error handler: {sanitized_error}",
                 "VEC Plugin",
-                Qgis.Critical
+                QgisCritical
             )
     
     def _create_vector_layer(self, shapefile_path, layer_name, crs):

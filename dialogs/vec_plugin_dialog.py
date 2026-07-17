@@ -29,15 +29,18 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets, QtCore, QtGui
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtGui import QDesktopServices
-from qgis.core import QgsProject, QgsGeometry, QgsWkbTypes, QgsPointXY, QgsMessageLog, Qgis
+from qgis.core import QgsProject, QgsGeometry, QgsPointXY, QgsMessageLog
 from qgis.gui import QgsMapToolCapture, QgsRubberBand
 from .order_imagery_dialog import OrderImageryDialog
 from .feedback_dialog import FeedbackDialog
-from ..core.api_config import INFERENCE_BASE_URL
+from ..core.api_config import INFERENCE_BASE_URL, FIELDWATCH_GET_LICENCE_URL
 from ..core import trial_helpers
 from ..core.qt_compat import (
+    CapturePolygon,
     LeftButton,
     PointingHandCursor,
+    PolygonGeometry,
+    QgisWarning,
     RightButton,
     RightToLeft,
     dialog_exec,
@@ -51,9 +54,6 @@ from ..core.onboarding_helpers import (
     set_process_button_enabled,
     show_onboarding_dialog,
 )
-
-# Browser destination for paid licence keys.
-FIELDWATCH_HOME_URL = "https://usefieldwatch.com/"
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -83,7 +83,7 @@ class PolygonCaptureTool(QgsMapToolCapture):
     finished = QtCore.pyqtSignal(QgsGeometry)
     
     def __init__(self, canvas, cad_dock_widget=None):
-        super(PolygonCaptureTool, self).__init__(canvas, cad_dock_widget, QgsMapToolCapture.CapturePolygon)
+        super(PolygonCaptureTool, self).__init__(canvas, cad_dock_widget, CapturePolygon)
         self.canvas = canvas
         self.points = []
         self.rubber_band = None
@@ -108,13 +108,13 @@ class PolygonCaptureTool(QgsMapToolCapture):
             self.points.append(QgsPointXY(point))
             # Draw temporary rubber band
             if self.rubber_band is None:
-                self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+                self.rubber_band = QgsRubberBand(self.canvas, PolygonGeometry)
                 self.rubber_band.setColor(qt_red)
                 self.rubber_band.setWidth(2)
                 # Match order imagery dialog styling: semi-transparent red fill
                 self.rubber_band.setFillColor(QtGui.QColor(255, 0, 0, 60))
             if len(self.points) > 1:
-                self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+                self.rubber_band.reset(PolygonGeometry)
                 for p in self.points:
                     self.rubber_band.addPoint(p, False)
                 self.rubber_band.addPoint(self.points[0], True)  # Close polygon
@@ -463,6 +463,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             self._install_key,
             on_registered=self._after_onboarding_registered,
         )
+        if trial_helpers.is_onboarding_complete():
+            QtCore.QTimer.singleShot(0, self.refresh_trial_state)
         self._sync_ok_button_state()
 
     def _open_onboarding_from_terms(self):
@@ -612,13 +614,15 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.tr("Using paid license — runs use your key, not trial quota.")
             )
             self.trialQuotaLabel.setStyleSheet("color: gray;")
-        elif not trial_helpers.is_trial_established():
-            self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
-            self.trialQuotaLabel.setStyleSheet("color: blue;")
         elif self.trial_status is None and self.trial_uses_remaining is None:
             if self._trial_quota_spinner.isVisible():
                 self.trialQuotaLabel.setText(self.tr("Loading trial status…"))
                 self.trialQuotaLabel.setStyleSheet("color: blue;")
+            elif not trial_helpers.is_trial_established():
+                self.trialQuotaLabel.setText(
+                    self.tr("Trial not started — check your connection or restart the plugin.")
+                )
+                self.trialQuotaLabel.setStyleSheet("color: orange;")
             else:
                 self.trialQuotaLabel.setText("")
                 self.trialQuotaLabel.setStyleSheet("color: gray;")
@@ -764,7 +768,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         QgsMessageLog.logMessage(
             f"Trial state refresh: {_err_text}",
             "VEC Plugin",
-            Qgis.Warning,
+            QgisWarning,
         )
         if show_error_dialog:
             QtWidgets.QMessageBox.warning(
@@ -961,7 +965,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def open_fieldwatch_website(self):
         """Open FieldWatch website for a full paid licence key (existing behaviour)."""
-        QDesktopServices.openUrl(QUrl(FIELDWATCH_HOME_URL))
+        QDesktopServices.openUrl(QUrl(FIELDWATCH_GET_LICENCE_URL))
 
     def open_how_to_use_plugin_video(self):
         """Open the plugin walkthrough video (YouTube)."""
@@ -1119,25 +1123,25 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # 1) Reset crop polygon and status
         try:
             self.clear_polygon()
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError, TypeError):
+            None
 
         # 2) Repopulate input layers
         try:
             self.populate_layers()
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError, TypeError):
+            None
 
         # 3) Reset status / progress
         try:
             self.statusLabel.setText("Ready")
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError, TypeError):
+            None
         try:
             self.progressBar.setVisible(False)
             self.progressBar.setValue(0)
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError, TypeError):
+            None
 
         # Disable OK until polygon + auth again
         self._sync_ok_button_state()
@@ -1146,8 +1150,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         if self.order_imagery_dialog is not None:
             try:
                 self.order_imagery_dialog.close()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError, TypeError):
+                None
             self.order_imagery_dialog = None
 
         # 6) Refresh trial quota from server

@@ -2,10 +2,11 @@
 """Modal feedback dialog: large text area, 1500 char cap, submits to FieldWatch API."""
 
 from qgis.PyQt import QtWidgets
-from qgis.core import QgsMessageLog, Qgis
+from qgis.core import QgsMessageLog
 
 from ..core.api_config import INFERENCE_BASE_URL
 from ..core import feedback_helpers
+from ..core.qt_compat import DialogButtonBoxCancel, DialogButtonBoxSave, QgisWarning
 
 
 class FeedbackDialog(QtWidgets.QDialog):
@@ -42,9 +43,9 @@ class FeedbackDialog(QtWidgets.QDialog):
         self._text.textChanged.connect(self._on_text_changed)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Save
+            DialogButtonBoxCancel | DialogButtonBoxSave
         )
-        buttons.button(QtWidgets.QDialogButtonBox.Save).setText(self.tr("Send"))
+        buttons.button(DialogButtonBoxSave).setText(self.tr("Send"))
         buttons.accepted.connect(self._submit)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -87,7 +88,7 @@ class FeedbackDialog(QtWidgets.QDialog):
                 self.tr("Feedback failed"),
                 str(e)[:800],
             )
-            QgsMessageLog.logMessage(str(e), "VEC Plugin", Qgis.Warning)
+            QgsMessageLog.logMessage(str(e), "VEC Plugin", QgisWarning)
             return
 
         submitted = result.get("submitted_at") or result.get("created_at") or ""

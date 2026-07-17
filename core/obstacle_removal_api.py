@@ -11,6 +11,7 @@ from qgis.core import Qgis, QgsMessageLog
 
 from .api_config import ApiRoutes, INFERENCE_BASE_URL
 from .one_click_log import sanitize_log_line
+from .qt_compat import (QgisInfo)
 
 LOG_CHANNEL = "FieldWatch"
 DEFAULT_TIMEOUT = 120
@@ -102,7 +103,7 @@ def post_edit(
             + (f" ({hdrs['processing_seconds']}s)" if hdrs["processing_seconds"] else "")
         ),
         LOG_CHANNEL,
-        Qgis.MessageLevel.Info,
+        QgisInfo,
     )
 
     if response.status_code == 200:

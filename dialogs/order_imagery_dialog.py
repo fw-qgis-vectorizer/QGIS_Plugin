@@ -15,6 +15,7 @@ from ..core.qt_compat import (
     FrameNoFrame,
     LeftButton,
     PlainText,
+    PolygonGeometry,
     RightButton,
     ScrollBarAsNeeded,
     blue as qt_blue,
@@ -27,7 +28,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.core import (
     QgsProject, QgsDistanceArea, QgsGeometry, QgsPointXY,
-    QgsRectangle, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsRasterLayer,
+    QgsRectangle, QgsCoordinateReferenceSystem, QgsRasterLayer,
     QgsCoordinateTransform
 )
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsRubberBand
@@ -65,14 +66,14 @@ class SimplePolygonMapTool(QgsMapTool):
             self.points.append(QgsPointXY(point))
             if self.rubber_band is None:
                 self.rubber_band = QgsRubberBand(
-                    self.canvas, QgsWkbTypes.PolygonGeometry
+                    self.canvas, PolygonGeometry
                 )
                 self.rubber_band.setColor(qt_red)
                 self.rubber_band.setWidth(2)
                 # Semi-transparent fill so underlying imagery is visible
                 self.rubber_band.setFillColor(QColor(255, 0, 0, 60))
             if len(self.points) > 1:
-                self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+                self.rubber_band.reset(PolygonGeometry)
                 for p in self.points:
                     self.rubber_band.addPoint(p, False)
                 self.rubber_band.addPoint(self.points[0], True)
@@ -531,7 +532,7 @@ class OrderImageryDialog(QDialog):
             points.append(QgsPointXY(pt_canvas.x() + dx, pt_canvas.y() + dy))
         points.append(points[0])  # close ring
         geom = QgsGeometry.fromPolygonXY([points])
-        self._goto_point_rb = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+        self._goto_point_rb = QgsRubberBand(self.canvas, PolygonGeometry)
         self._goto_point_rb.setColor(qt_blue)
         self._goto_point_rb.setWidth(2)
         self._goto_point_rb.setFillColor(QColor(0, 0, 255, 80))
@@ -585,13 +586,13 @@ class OrderImageryDialog(QDialog):
 
         # Draw polygon on embedded canvas (clear previous manual polygon if any)
         if self._manual_points_rb is None:
-            self._manual_points_rb = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            self._manual_points_rb = QgsRubberBand(self.canvas, PolygonGeometry)
             self._manual_points_rb.setColor(qt_red)
             self._manual_points_rb.setWidth(2)
             # Semi-transparent fill so underlying imagery is visible
             self._manual_points_rb.setFillColor(QColor(255, 0, 0, 60))
         else:
-            self._manual_points_rb.reset(QgsWkbTypes.PolygonGeometry)
+            self._manual_points_rb.reset(PolygonGeometry)
         self._manual_points_rb.setToGeometry(geom_canvas, None)
         self.clear_aoi_btn.setEnabled(True)
 
@@ -728,12 +729,9 @@ class OrderImageryDialog(QDialog):
         except requests.exceptions.RequestException as e:
             msg = str(e)
             if hasattr(e, "response") and e.response is not None:
-                try:
-                    body = e.response.text[:200] if e.response.text else ""
-                    if body:
-                        msg = "{} - {}".format(e.response.status_code, body)
-                except Exception:
-                    pass
+                body = getattr(e.response, "text", None) or ""
+                if body:
+                    msg = "{} - {}".format(e.response.status_code, body[:200])
             QMessageBox.warning(
                 self,
                 "Request failed",

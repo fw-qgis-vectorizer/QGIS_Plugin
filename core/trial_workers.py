@@ -25,6 +25,7 @@ class TrialStateFetchWorker(QtCore.QThread):
                 self._install_key,
                 trial_id=self._trial_id,
                 timeout=5,
+                include_stored_contact=True,
             )
             self.finished_ok.emit(data)
         except Exception as e:

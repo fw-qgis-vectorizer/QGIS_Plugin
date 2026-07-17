@@ -16,6 +16,7 @@ from qgis.core import QgsMessageLog, Qgis
 
 from .api_config import INFERENCE_BASE_URL
 from . import trial_helpers
+from .qt_compat import (QgisInfo)
 
 LOG_CHANNEL = "FieldWatch"
 
@@ -23,7 +24,7 @@ LOG_CHANNEL = "FieldWatch"
 ONE_CLICK_TRIAL_MIN_REMAINING = 3
 
 
-def _log(msg: str, level=Qgis.MessageLevel.Info) -> None:
+def _log(msg: str, level=QgisInfo) -> None:
     QgsMessageLog.logMessage(msg, LOG_CHANNEL, level=level)
 
 
@@ -163,6 +164,7 @@ class TrialAccess:
                 self.install_key,
                 trial_id=self.trial_id,
                 timeout=timeout,
+                include_stored_contact=True,
             )
             self.apply_server_state(data)
         except Exception as exc:
@@ -208,11 +210,13 @@ class TrialAccess:
                 upload_url=upload_url,
                 jwt_token=jwt or None,
                 license_key=license_key,
+                install_key=self.install_key,
             )
             token, expiry = client.validate_license_key(license_key)
             if token:
                 self.set_paid_license(token, license_key, expiry)
                 client.jwt_token = token
+                client.install_key = self.install_key
                 return client, "", None
             if jwt:
                 self.clear_paid_license()
@@ -235,6 +239,7 @@ class TrialAccess:
             trial_receipt=receipt,
             trial_install_key=self.install_key,
             trial_server_id=self.trial_id,
+            install_key=self.install_key,
         )
         return client, "", usage
 

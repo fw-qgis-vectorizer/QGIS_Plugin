@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from qgis.core import QgsGeometry, QgsPointXY, QgsRectangle, QgsWkbTypes
+from qgis.core import QgsGeometry, QgsPointXY, QgsRectangle
 from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtGui import QColor, QCursor
 
-from ..core.qt_compat import CrossCursor, LeftButton
+from ..core.qt_compat import CrossCursor, LeftButton, PolygonGeometry
 from .space_pan_mixin import SpacePanMixin
 
 
@@ -56,7 +56,7 @@ class ObstacleBoxMapTool(SpacePanMixin, QgsMapTool):
             return
         self._start = self.toMapCoordinates(event.pos())
         if self._band is None:
-            self._band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+            self._band = QgsRubberBand(self.canvas, PolygonGeometry)
             self._band.setColor(self._LINE)
             self._band.setFillColor(self._FILL)
             self._band.setWidth(2)
@@ -81,6 +81,6 @@ class ObstacleBoxMapTool(SpacePanMixin, QgsMapTool):
         rect.normalize()
         self._start = None
         if self._band:
-            self._band.reset(QgsWkbTypes.PolygonGeometry)
+            self._band.reset(PolygonGeometry)
         if rect.width() > 0 and rect.height() > 0:
             self.box_finished.emit(rect)
