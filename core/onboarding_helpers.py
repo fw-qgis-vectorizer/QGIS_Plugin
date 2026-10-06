@@ -12,7 +12,7 @@ from .account_register import DEFAULT_REASON_FOR_USE, registration_form_tooltip
 from . import trial_helpers
 
 ONBOARDING_REQUIRED_TOOLTIP = (
-    "You must accept the terms and conditions before using this feature."
+    "Sign in or create a FieldWatch account before using this feature."
 )
 
 

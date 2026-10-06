@@ -49,8 +49,11 @@ from ..workers.obstacle_merge_worker import ObstacleMergeWorker
 from ..workers.obstacle_removal_worker import ObstacleRemovalWorker
 
 
-class ObstacleRemovalDialog(QtWidgets.QDialog):
-    """Draw removal boxes, enter one prompt, POST crops to nano banana edit API."""
+class ObstacleRemovalDialog(QtWidgets.QWidget):
+    """Draw removal boxes, enter one prompt, POST crops to nano banana edit API.
+
+    When ``pack_dialog`` is set, this panel is embedded in the main pack stack.
+    """
 
     _PRESETS = (
         ("vehicle", "Remove the vehicle and reconstruct the ground surface beneath it"),
@@ -68,10 +71,16 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
     _SOLAR_FILL = QColor(60, 180, 255, 70)
     _SOLAR_LINE = QColor(60, 180, 255, 220)
 
-    def __init__(self, iface, parent=None, pack_dialog=None):
-        super().__init__(parent or iface.mainWindow())
+    def __init__(self, iface, parent=None, pack_dialog=None, embedded=False):
+        host = parent
+        if host is None and pack_dialog is not None:
+            host = pack_dialog
+        if host is None:
+            host = iface.mainWindow()
+        super().__init__(host)
         self.iface = iface
         self._pack_dialog = pack_dialog
+        self._embedded = bool(embedded or pack_dialog is not None)
         self._boxes: list[dict] = []
         self._solar_areas: list[dict] = []
         self._overlay_bands: list[QgsRubberBand] = []
@@ -89,7 +98,6 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
         self._shortcut_filter: SpacePanShortcutFilter | None = None
 
         self.setWindowTitle(self.tr("AI Imagery Edit"))
-        self.setModal(False)
         self.resize(520, 680)
         self._build_ui()
         self.populate_layers()
@@ -1196,16 +1204,14 @@ class ObstacleRemovalDialog(QtWidgets.QDialog):
             if self._merge_worker and self._merge_worker.isRunning():
                 self._merge_worker.wait(3000)
         self._cleanup_map_tool()
-        self.hide()
         if self._pack_dialog is not None:
             from .vec_plugin_dialog import _PAGE_LANDING
 
             self._pack_dialog._show_page(_PAGE_LANDING)
             self._pack_dialog._sync_ui_from_trial_access()
             self._pack_dialog._update_trial_quota_label()
-            self._pack_dialog.show()
-            self._pack_dialog.raise_()
-            self._pack_dialog.activateWindow()
+            return
+        self.hide()
 
     def shutdown(self):
         """Safe teardown when plugin unloads or dialog closes."""

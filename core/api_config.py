@@ -28,6 +28,10 @@ class ApiRoutes:
         return _join_url(inference_base, "auth", "validate")
 
     @staticmethod
+    def auth_login(inference_base):
+        return _join_url(inference_base, "auth", "login")
+
+    @staticmethod
     def qgis_trial_state(inference_base):
         return _join_url(inference_base, "qgis", "trial", "state")
 

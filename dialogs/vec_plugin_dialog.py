@@ -31,7 +31,6 @@ from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.core import QgsProject, QgsGeometry, QgsPointXY, QgsMessageLog
 from qgis.gui import QgsMapToolCapture, QgsRubberBand
-from .order_imagery_dialog import OrderImageryDialog
 from .feedback_dialog import FeedbackDialog
 from ..core.api_config import INFERENCE_BASE_URL, FIELDWATCH_GET_LICENCE_URL
 from ..core import trial_helpers
@@ -52,7 +51,6 @@ from ..core.onboarding_helpers import (
     prompt_onboarding_if_needed,
     require_onboarding,
     set_process_button_enabled,
-    show_onboarding_dialog,
 )
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -62,7 +60,8 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 _PAGE_LANDING = 0
 _PAGE_ONE_CLICK = 1
 _PAGE_VECTORIZATION = 2
-_PAGE_OBSTACLE_REMOVAL = 3
+_PAGE_OBSTACLE = 3
+_PAGE_ORDER = 4
 
 _LANDING_ACTION_STYLE = (
     "QPushButton {"
@@ -138,10 +137,12 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
     polygon_drawn = QtCore.pyqtSignal(QgsGeometry)
     # Signal emitted when Run is clicked (but dialog stays open)
     processing_started = QtCore.pyqtSignal()
-    # Open one-click segmentation settings (small window)
+    # Open one-click segmentation (embedded stack page)
     one_click_requested = QtCore.pyqtSignal()
-    # Open AI Obstacle Removal (nano banana edit)
+    # Open AI Obstacle Removal (embedded stack page)
     obstacle_removal_requested = QtCore.pyqtSignal()
+    # Open Order Drone Imagery (embedded stack page)
+    order_imagery_requested = QtCore.pyqtSignal()
     
     def __init__(self, parent=None, iface=None):
         """Constructor."""
@@ -151,7 +152,11 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.map_tool = None
         self.previous_map_tool = None
         self.order_imagery_dialog = None
+        self._one_click_panel = None
+        self._obstacle_panel = None
+        self._order_panel = None
         self._returning_from_polygon_draw = False
+        self._pending_page = None
         
         # Set up the user interface from Designer through FORM_CLASS.
         # After self.setupUi() you can access any designer object by doing
@@ -306,7 +311,7 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.sendFeedbackButton = QtWidgets.QPushButton(self.tr("Send feedback"))
         self.termsButton = QtWidgets.QPushButton(self.tr("Terms"))
         self.termsButton.setToolTip(
-            self.tr("Enter your email and accept the terms and conditions.")
+            self.tr("Open FieldWatch terms and conditions in your browser.")
         )
         landing_footer.addWidget(self.howToUsePluginButton)
         landing_footer.addWidget(self.sendFeedbackButton)
@@ -320,45 +325,18 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self._btn_obstacle_removal.clicked.connect(
             self.obstacle_removal_requested.emit
         )
-        self._btn_order_imagery.clicked.connect(self.open_order_imagery_dialog)
+        self._btn_order_imagery.clicked.connect(self.order_imagery_requested.emit)
         self.howToUsePluginButton.clicked.connect(self.open_how_to_use_plugin_video)
         self.sendFeedbackButton.clicked.connect(self.open_feedback_dialog)
-        self.termsButton.clicked.connect(self._open_onboarding_from_terms)
+        self.termsButton.clicked.connect(self.open_terms_and_conditions)
 
-        # --- One-click placeholder ---
+        # --- One-click (embedded panel host) ---
         self._page_one_click = QtWidgets.QWidget()
-        one_click_layout = QtWidgets.QVBoxLayout(self._page_one_click)
-        one_click_layout.setContentsMargins(24, 24, 24, 16)
-        one_click_layout.setSpacing(12)
+        self._one_click_host = QtWidgets.QVBoxLayout(self._page_one_click)
+        self._one_click_host.setContentsMargins(0, 0, 0, 0)
+        self._one_click_host.setSpacing(0)
 
-        oc_title = QtWidgets.QLabel(self.tr("One-Click Segmentation"))
-        oc_title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        one_click_layout.addWidget(oc_title)
-
-        oc_body = QtWidgets.QLabel(
-            self.tr(
-                "Trial runs are available automatically. Open map tools (or validate a paid licence if needed)."
-            )
-        )
-        oc_body.setWordWrap(True)
-        oc_body.setStyleSheet("color: palette(mid);")
-        one_click_layout.addWidget(oc_body)
-
-        self._openOneClickButton = QtWidgets.QPushButton(self.tr("Open segmentation"))
-        self._openOneClickButton.setStyleSheet(_LANDING_ACTION_STYLE)
-        self._openOneClickButton.setCursor(PointingHandCursor)
-        one_click_layout.addWidget(self._openOneClickButton)
-        one_click_layout.addStretch()
-
-        one_click_footer = QtWidgets.QHBoxLayout()
-        self.backFromOneClickButton = QtWidgets.QPushButton(self.tr("Back"))
-        one_click_footer.addWidget(self.backFromOneClickButton)
-        one_click_footer.addStretch()
-        one_click_layout.addLayout(one_click_footer)
-        self.backFromOneClickButton.clicked.connect(lambda: self._show_page(_PAGE_LANDING))
-        self._openOneClickButton.clicked.connect(self.one_click_requested.emit)
-
-        # --- Large area vectorization (existing form) ---
+        # --- Large area vectorization (existing .ui form widgets) ---
         self._page_vectorization = QtWidgets.QWidget()
         vec_layout = QtWidgets.QVBoxLayout(self._page_vectorization)
         vec_layout.setContentsMargins(0, 0, 0, 0)
@@ -392,15 +370,57 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.runButton.clicked.connect(self.accept)
         self.cancelButton.clicked.connect(self.reject)
 
+        # --- Obstacle / AI edit (embedded panel host) ---
+        self._page_obstacle = QtWidgets.QWidget()
+        self._obstacle_host = QtWidgets.QVBoxLayout(self._page_obstacle)
+        self._obstacle_host.setContentsMargins(0, 0, 0, 0)
+        self._obstacle_host.setSpacing(0)
+
+        # --- Order imagery (embedded panel host) ---
+        self._page_order = QtWidgets.QWidget()
+        self._order_host = QtWidgets.QVBoxLayout(self._page_order)
+        self._order_host.setContentsMargins(0, 0, 0, 0)
+        self._order_host.setSpacing(0)
+
         self._stack.addWidget(self._page_landing)
         self._stack.addWidget(self._page_one_click)
         self._stack.addWidget(self._page_vectorization)
+        self._stack.addWidget(self._page_obstacle)
+        self._stack.addWidget(self._page_order)
 
         while self.verticalLayout.count():
             self.verticalLayout.takeAt(0)
         self.verticalLayout.addWidget(self._stack)
 
         self.resize(500, 580)
+
+    def attach_one_click_panel(self, panel):
+        """Embed the one-click settings panel into the stack page."""
+        if panel is None or self._one_click_panel is panel:
+            return
+        if self._one_click_panel is not None:
+            self._one_click_host.removeWidget(self._one_click_panel)
+        self._one_click_panel = panel
+        self._one_click_host.addWidget(panel)
+
+    def attach_obstacle_panel(self, panel):
+        """Embed the AI imagery edit panel into the stack page."""
+        if panel is None or self._obstacle_panel is panel:
+            return
+        if self._obstacle_panel is not None:
+            self._obstacle_host.removeWidget(self._obstacle_panel)
+        self._obstacle_panel = panel
+        self._obstacle_host.addWidget(panel)
+
+    def attach_order_panel(self, panel):
+        """Embed the order-imagery panel into the stack page."""
+        if panel is None or self._order_panel is panel:
+            return
+        if self._order_panel is not None:
+            self._order_host.removeWidget(self._order_panel)
+        self._order_panel = panel
+        self._order_host.addWidget(panel)
+        self.order_imagery_dialog = panel
 
     def _place_license_panel(self, page_widget, insert_index=0):
         """Shared licence + trial quota panel on workflow pages only."""
@@ -417,26 +437,51 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self.licenseGroupBox.show()
 
     def _show_page(self, index):
+        previous = self._stack.currentIndex() if hasattr(self, "_stack") else None
+        if (
+            previous == _PAGE_OBSTACLE
+            and index != _PAGE_OBSTACLE
+            and self._obstacle_panel is not None
+        ):
+            cleanup = getattr(self._obstacle_panel, "_cleanup_map_tool", None)
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except (RuntimeError, AttributeError, TypeError) as exc:
+                    QgsMessageLog.logMessage(
+                        f"Obstacle map-tool cleanup on page leave: {exc}",
+                        "FieldWatch",
+                        QgisWarning,
+                    )
+
         self._stack.setCurrentIndex(index)
         titles = {
             _PAGE_LANDING: self.tr("The FieldWatch Pack."),
             _PAGE_ONE_CLICK: self.tr("One-Click Segmentation"),
             _PAGE_VECTORIZATION: self.tr("Large Area Vectorization"),
+            _PAGE_OBSTACLE: self.tr("AI Imagery Edit"),
+            _PAGE_ORDER: self.tr("Order Drone Imagery"),
         }
         self.setWindowTitle(titles.get(index, self.tr("The FieldWatch Pack.")))
         if index == _PAGE_VECTORIZATION:
             self._place_license_panel(self._page_vectorization, insert_index=0)
             self.populate_layers()
             self._update_trial_quota_label()
-            self.resize(500, 620)
+            self.resize(520, 640)
         elif index == _PAGE_ONE_CLICK:
             self.licenseGroupBox.hide()
-            self.resize(440, 320)
+            self.resize(480, 640)
+        elif index == _PAGE_OBSTACLE:
+            self.licenseGroupBox.hide()
+            self.resize(540, 720)
+        elif index == _PAGE_ORDER:
+            self.licenseGroupBox.hide()
+            self.resize(560, 760)
         elif index == _PAGE_LANDING:
             self.licenseGroupBox.hide()
-            self.resize(440, 360)
+            self.resize(480, 420)
         else:
-            self.resize(440, 280)
+            self.resize(480, 360)
 
     def _show_initial_page(self):
         """Landing hub, or large-area page when returning from polygon draw."""
@@ -447,9 +492,14 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             self._show_page(_PAGE_LANDING)
 
     def showEvent(self, event):
-        """Show landing; prompt onboarding for new users; sync trial when complete."""
+        """Show landing (or a pending workflow page); prompt onboarding for new users."""
         super(VecPluginDialog, self).showEvent(event)
-        self._show_initial_page()
+        if self._pending_page is not None:
+            page = self._pending_page
+            self._pending_page = None
+            self._show_page(page)
+        else:
+            self._show_initial_page()
         self._sync_ui_from_trial_access()
         if trial_helpers.is_onboarding_complete():
             self._trial_acc.sync_pending_usages()
@@ -467,13 +517,9 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
             QtCore.QTimer.singleShot(0, self.refresh_trial_state)
         self._sync_ok_button_state()
 
-    def _open_onboarding_from_terms(self):
-        show_onboarding_dialog(
-            self,
-            self._install_key,
-            on_registered=self._after_onboarding_registered,
-        )
-        self._sync_ok_button_state()
+    def open_terms_and_conditions(self):
+        """Open terms in the browser (does not re-open Sign in / Sign up)."""
+        QDesktopServices.openUrl(QUrl("https://usefieldwatch.com/terms"))
 
     def _sync_ui_from_trial_access(self):
         acc = self._trial_acc
@@ -807,21 +853,8 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         self._trial_billable_idempotency_key = None
 
     def open_order_imagery_dialog(self):
-        """Open the Order drone imagery dialog."""
-        if not self.iface:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Error",
-                "Cannot open order dialog: QGIS interface not available."
-            )
-            return
-        
-        if self.order_imagery_dialog is None:
-            self.order_imagery_dialog = OrderImageryDialog(iface=self.iface, parent=self)
-        
-        self.order_imagery_dialog.show()
-        self.order_imagery_dialog.raise_()
-        self.order_imagery_dialog.activateWindow()
+        """Open Order Drone Imagery as an embedded stack page (via plugin)."""
+        self.order_imagery_requested.emit()
 
     @staticmethod
     def _looks_like_trial_uuid(text):
@@ -1146,13 +1179,14 @@ class VecPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # Disable OK until polygon + auth again
         self._sync_ok_button_state()
 
-        # 5) Reset / recreate the Order Imagery dialog so it opens fresh next time
+        # 5) Reset order-imagery confirmation page if present
         if self.order_imagery_dialog is not None:
             try:
-                self.order_imagery_dialog.close()
+                stacked = getattr(self.order_imagery_dialog, "stacked_widget", None)
+                if stacked is not None:
+                    stacked.setCurrentIndex(0)
             except (RuntimeError, AttributeError, TypeError):
                 None
-            self.order_imagery_dialog = None
 
         # 6) Refresh trial quota from server
         QtCore.QTimer.singleShot(0, self.refresh_trial_state)

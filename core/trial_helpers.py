@@ -250,6 +250,10 @@ _USER_FIRST_NAME_KEY = "user_first_name"
 _USER_LAST_NAME_KEY = "user_last_name"
 _ONBOARDING_COMPLETED_AT_KEY = "onboarding_completed_at"
 _ONBOARDING_LEGACY_SKIP_KEY = "onboarding_legacy_skip"
+# QgsSettings keys for signed-in session storage (local profile only).
+_USER_SESSION_STORE_KEY = "fw_user_session"
+_USER_SESSION_EXPIRES_KEY = "fw_user_session_exp"
+_USER_ID_KEY = "user_id"
 
 
 def _settings_bool(raw) -> bool:
@@ -272,9 +276,12 @@ def normalize_trial_email(raw_email: str) -> str:
 
 def is_onboarding_complete() -> bool:
     """
-    True when this QGIS profile finished onboarding: FieldWatch account created,
-    and OK clicked (``onboarding_complete`` + stored email). Legacy upgrades may
-    skip without email via ``onboarding_legacy_skip``.
+    True when this QGIS profile already signed in or signed up once.
+
+    Stored permanently in QgsSettings (``onboarding_complete`` + email).
+    User JWT expiry does **not** clear this — returning users stay signed in
+    and are not shown Sign in / Sign up again. Legacy upgrades may skip
+    without email via ``onboarding_legacy_skip``.
     """
     s = QgsSettings()
     s.beginGroup(SETTINGS_GROUP)
@@ -345,6 +352,57 @@ def save_onboarding(email: str, *, first_name: str = "", last_name: str = "") ->
     s.setValue(_ONBOARDING_COMPLETE_KEY, True)
     s.setValue(_ONBOARDING_COMPLETED_AT_KEY, completed_at)
     s.remove(_ONBOARDING_LEGACY_SKIP_KEY)
+    s.endGroup()
+    s.sync()
+
+
+def save_user_session(
+    *,
+    token: str,
+    email: str,
+    first_name: str = "",
+    last_name: str = "",
+    user_id: str = "",
+    expires_at: str = "",
+) -> None:
+    """
+    Persist a successful email/password sign-in permanently for this QGIS profile.
+
+    Marks onboarding complete so Sign in / Sign up is not shown again.
+    The user JWT is kept for optional API use; its expiry does not force re-login.
+    """
+    save_onboarding(email, first_name=first_name, last_name=last_name)
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    s.setValue(_USER_SESSION_STORE_KEY, (token or "").strip())
+    s.setValue(_USER_SESSION_EXPIRES_KEY, (expires_at or "").strip())
+    s.setValue(_USER_ID_KEY, (user_id or "").strip())
+    s.endGroup()
+    s.sync()
+
+
+def load_user_session() -> dict:
+    """Return stored user session fields (token may be empty if signed up only)."""
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    out = {
+        "token": (s.value(_USER_SESSION_STORE_KEY, "", type=str) or "").strip() or None,
+        "expires_at": (s.value(_USER_SESSION_EXPIRES_KEY, "", type=str) or "").strip() or None,
+        "user_id": (s.value(_USER_ID_KEY, "", type=str) or "").strip() or None,
+        "email": (s.value(_USER_EMAIL_KEY, "", type=str) or "").strip() or None,
+        "first_name": (s.value(_USER_FIRST_NAME_KEY, "", type=str) or "").strip() or None,
+        "last_name": (s.value(_USER_LAST_NAME_KEY, "", type=str) or "").strip() or None,
+    }
+    s.endGroup()
+    return out
+
+
+def clear_user_session() -> None:
+    """Clear stored user JWT only (does not sign the user out of the plugin)."""
+    s = QgsSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    for key in (_USER_SESSION_STORE_KEY, _USER_SESSION_EXPIRES_KEY, _USER_ID_KEY):
+        s.remove(key)
     s.endGroup()
     s.sync()
 

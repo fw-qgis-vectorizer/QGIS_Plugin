@@ -161,9 +161,14 @@ No licence key is required for this form.
 
 ## Landing page (shared)
 
+On first open (new QGIS profile only) you get **Sign up** or **Sign in**. After that you stay signed in on this profile — the auth dialog is not shown again.
+
+All four workflows open as pages inside the same pack window (Back returns to this landing). Feedback stays a small form; Terms opens in the browser.
+
 - **Get Licence** — Opens [usefieldwatch.com](https://usefieldwatch.com/) in your browser.
 - **How to use this plugin** — Walkthrough video.
 - **Send feedback** — Short form posted to FieldWatch.
+- **Terms** — Opens terms in the browser.
 
 ---
 

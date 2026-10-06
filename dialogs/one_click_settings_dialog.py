@@ -20,24 +20,35 @@ from ..core.qt_compat import (
 )
 
 
-class OneClickSettingsDialog(QtWidgets.QDialog):
-    """Compact dialog: layer, deps/model status, download, start/stop, save."""
+class OneClickSettingsDialog(QtWidgets.QWidget):
+    """Settings panel: layer, deps/model status, download, start/stop, save.
 
-    def __init__(self, iface, parent=None, pack_dialog=None):
-        super().__init__(parent or iface.mainWindow())
+    When ``pack_dialog`` is set (embedded mode), this lives inside the main
+    FieldWatch stack page instead of a separate window.
+    """
+
+    def __init__(self, iface, parent=None, pack_dialog=None, embedded=False):
+        host = parent
+        if host is None and pack_dialog is not None:
+            host = pack_dialog
+        if host is None:
+            host = iface.mainWindow()
+        super().__init__(host)
         self.iface = iface
         self._pack_dialog = pack_dialog
+        self._embedded = bool(embedded or pack_dialog is not None)
         self._controller = None
         self._deps_worker = None
         self._download_worker = None
         self._setup_busy = False
         self._segmentation_active = False
         self.setWindowTitle(self.tr("One-Click Segmentation"))
-        self.setModal(False)
         self.resize(440, 580)
         self._build_ui()
+        if self._embedded:
+            self.closeButton.setVisible(False)
         self.populate_layers()
-        # Defer status check so the window opens immediately (no UI-thread subprocess).
+        # Defer status check so the page opens immediately (no UI-thread subprocess).
         QtCore.QTimer.singleShot(0, self.refresh_all)
 
     def _build_ui(self):
@@ -179,16 +190,14 @@ class OneClickSettingsDialog(QtWidgets.QDialog):
                 return
         if self._controller:
             self._controller.shutdown()
-        self.hide()
         if self._pack_dialog is not None:
             from .vec_plugin_dialog import _PAGE_LANDING
 
             self._pack_dialog._show_page(_PAGE_LANDING)
             self._pack_dialog._sync_ui_from_trial_access()
             self._pack_dialog._update_trial_quota_label()
-            self._pack_dialog.show()
-            self._pack_dialog.raise_()
-            self._pack_dialog.activateWindow()
+            return
+        self.hide()
 
     def _on_layer_combo_changed(self, _index: int):
         if self._controller:

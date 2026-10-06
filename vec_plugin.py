@@ -30,11 +30,12 @@ from qgis.core import (
 
 # Initialize Qt resources (resources/resources.py via resources package)
 from . import resources  # noqa: F401
-from .dialogs.vec_plugin_dialog import VecPluginDialog
-from .dialogs.order_imagery_dialog import OrderImageryDialog
-from .dialogs.one_click_settings_dialog import OneClickSettingsDialog
-from .dialogs.obstacle_removal_dialog import ObstacleRemovalDialog
-from .core.one_click_controller import OneClickSegmentationController
+from .dialogs.vec_plugin_dialog import (
+    VecPluginDialog,
+    _PAGE_ONE_CLICK,
+    _PAGE_OBSTACLE,
+    _PAGE_ORDER,
+)
 from .core.vec_inference_client import VecInferenceClient
 from .core.api_config import INFERENCE_BASE_URL, UPLOAD_BASE_URL
 from .core.qt_compat import (
@@ -119,9 +120,11 @@ class VecPlugin:
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
         self.first_start = None
+        self.dlg = None
         self.one_click_dlg = None
         self.one_click_controller = None
         self.obstacle_removal_dlg = None
+        self.order_imagery_dlg = None
         self._segmentation_predictor = None
         self._segmentation_preload_worker = None
         self._segmentation_preloading = False
@@ -250,6 +253,7 @@ class VecPlugin:
             self.obstacle_removal_dlg = None
         self.one_click_dlg = None
         self.one_click_controller = None
+        self.order_imagery_dlg = None
         if self._segmentation_predictor is not None:
             try:
                 self._segmentation_predictor.cleanup()
@@ -280,6 +284,8 @@ class VecPlugin:
             self.dlg.one_click_requested.connect(self.run_one_click_segmentation)
             safe_disconnect(self.dlg.obstacle_removal_requested)
             self.dlg.obstacle_removal_requested.connect(self.run_obstacle_removal)
+            safe_disconnect(self.dlg.order_imagery_requested)
+            self.dlg.order_imagery_requested.connect(self.run_order_imagery)
 
         QTimer.singleShot(0, self._preload_segmentation_model)
 
@@ -298,13 +304,38 @@ class VecPlugin:
         # Run the dialog event loop
         dialog_exec(self.dlg)
 
+    def _ensure_pack_dialog(self):
+        """Ensure the main pack dialog exists (menu shortcuts may open before run())."""
+        if self.dlg is None:
+            self.first_start = False
+            self.dlg = VecPluginDialog(iface=self.iface)
+            self.dlg.one_click_requested.connect(self.run_one_click_segmentation)
+            self.dlg.obstacle_removal_requested.connect(self.run_obstacle_removal)
+            self.dlg.order_imagery_requested.connect(self.run_order_imagery)
+            safe_disconnect(self.dlg.processing_started)
+            self.dlg.processing_started.connect(self._start_processing)
+        return self.dlg
+
     def run_order_imagery(self):
-        """Open the Order drone imagery dialog."""
-        if not hasattr(self, 'order_imagery_dlg') or self.order_imagery_dlg is None:
-            self.order_imagery_dlg = OrderImageryDialog(iface=self.iface)
-        self.order_imagery_dlg.show()
-        self.order_imagery_dlg.raise_()
-        self.order_imagery_dlg.activateWindow()
+        """Open Order drone imagery as an embedded page in the main pack dialog."""
+        from .dialogs.order_imagery_dialog import OrderImageryDialog
+
+        dlg = self._ensure_pack_dialog()
+        if self.order_imagery_dlg is None:
+            self.order_imagery_dlg = OrderImageryDialog(
+                iface=self.iface,
+                parent=dlg._page_order,
+                pack_dialog=dlg,
+                embedded=True,
+            )
+            dlg.attach_order_panel(self.order_imagery_dlg)
+        if dlg.isVisible():
+            dlg._show_page(_PAGE_ORDER)
+        else:
+            dlg._pending_page = _PAGE_ORDER
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _preload_segmentation_model(self):
         """Load segmentation model when the main plugin opens (background)."""
@@ -363,38 +394,61 @@ class VecPlugin:
         )
 
     def run_one_click_segmentation(self):
-        """Open the one-click segmentation settings window."""
+        """Open one-click segmentation as an embedded page in the main pack dialog."""
+        from .dialogs.one_click_settings_dialog import OneClickSettingsDialog
+        from .core.one_click_controller import OneClickSegmentationController
+
+        dlg = self._ensure_pack_dialog()
         if self.one_click_dlg is None:
             self.one_click_dlg = OneClickSettingsDialog(
-                self.iface, pack_dialog=self.dlg
+                self.iface,
+                parent=dlg._page_one_click,
+                pack_dialog=dlg,
+                embedded=True,
             )
             self.one_click_controller = OneClickSegmentationController(
                 self.iface, self.one_click_dlg, plugin=self
             )
             self.one_click_dlg.set_controller(self.one_click_controller)
             self.one_click_controller.apply_shared_predictor(self._segmentation_predictor)
+            dlg.attach_one_click_panel(self.one_click_dlg)
         else:
             self.one_click_controller.apply_shared_predictor(self._segmentation_predictor)
             self.one_click_dlg.refresh_ui_local()
         if self._segmentation_predictor is None and not self._segmentation_preloading:
             QTimer.singleShot(0, self._preload_segmentation_model)
-        self.one_click_dlg.show()
-        self.one_click_dlg.raise_()
-        self.one_click_dlg.activateWindow()
+        if dlg.isVisible():
+            dlg._show_page(_PAGE_ONE_CLICK)
+        else:
+            dlg._pending_page = _PAGE_ONE_CLICK
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def run_obstacle_removal(self):
-        """Open AI Obstacle Removal (nano banana / POST /qgis/edit)."""
+        """Open AI Obstacle Removal as an embedded page in the main pack dialog."""
+        from .dialogs.obstacle_removal_dialog import ObstacleRemovalDialog
+
+        dlg = self._ensure_pack_dialog()
         if self.obstacle_removal_dlg is None:
             self.obstacle_removal_dlg = ObstacleRemovalDialog(
-                self.iface, pack_dialog=self.dlg
+                self.iface,
+                parent=dlg._page_obstacle,
+                pack_dialog=dlg,
+                embedded=True,
             )
+            dlg.attach_obstacle_panel(self.obstacle_removal_dlg)
         else:
             self.obstacle_removal_dlg.licensePanel.refresh_trial_state(force=True)
             self.obstacle_removal_dlg.populate_layers()
             self.obstacle_removal_dlg._sync_apply_state()
-        self.obstacle_removal_dlg.show()
-        self.obstacle_removal_dlg.raise_()
-        self.obstacle_removal_dlg.activateWindow()
+        if dlg.isVisible():
+            dlg._show_page(_PAGE_OBSTACLE)
+        else:
+            dlg._pending_page = _PAGE_OBSTACLE
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
     
     def _start_processing(self):
         """Start the inference processing."""

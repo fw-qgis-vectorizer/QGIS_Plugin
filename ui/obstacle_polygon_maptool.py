@@ -8,7 +8,13 @@ from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtGui import QColor, QCursor
 
-from ..core.qt_compat import CrossCursor, LeftButton, LineGeometry, PolygonGeometry
+from ..core.qt_compat import (
+    CrossCursor,
+    LeftButton,
+    LineGeometry,
+    PolygonGeometry,
+    RightButton,
+)
 from .space_pan_mixin import SpacePanMixin
 
 

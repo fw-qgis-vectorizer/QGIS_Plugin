@@ -22,7 +22,7 @@ from ..core.qt_compat import (
     red as qt_red,
 )
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
+    QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QLabel, QPushButton, QComboBox, QLineEdit, QMessageBox,
     QStackedWidget, QWidget, QScrollArea, QFrame
 )
@@ -131,12 +131,20 @@ def _polygon_to_lat_lng(geometry, source_crs):
     return coords
 
 
-class OrderImageryDialog(QDialog):
-    """Dialog for ordering drone imagery: AOI on embedded map, options, contact, submit."""
+class OrderImageryDialog(QWidget):
+    """Order drone imagery: AOI on embedded map, options, contact, submit.
 
-    def __init__(self, iface, parent=None):
-        super(OrderImageryDialog, self).__init__(parent)
+    When ``pack_dialog`` is set, this panel is embedded in the main pack stack.
+    """
+
+    def __init__(self, iface, parent=None, pack_dialog=None, embedded=False):
+        host = parent
+        if host is None and pack_dialog is not None:
+            host = pack_dialog
+        super(OrderImageryDialog, self).__init__(host)
         self.iface = iface
+        self._pack_dialog = pack_dialog
+        self._embedded = bool(embedded or pack_dialog is not None)
         self.aoi_geometry = None
         self.canvas = None
         self.capture_tool = None
@@ -266,13 +274,19 @@ class OrderImageryDialog(QDialog):
         contact_layout.addRow("Phone:", self.phone_edit)
         layout.addWidget(contact_group)
 
-        # --- Submit ---
+        # --- Submit / Back ---
+        submit_row = QHBoxLayout()
+        self.back_btn = QPushButton("Back")
+        self.back_btn.clicked.connect(self._on_back)
         self.submit_btn = QPushButton("Submit request")
         self.submit_btn.setStyleSheet(
             "min-height: 28px; font-weight: bold;"
         )
         self.submit_btn.clicked.connect(self._submit_request)
-        layout.addWidget(self.submit_btn)
+        submit_row.addWidget(self.back_btn)
+        submit_row.addStretch()
+        submit_row.addWidget(self.submit_btn)
+        layout.addLayout(submit_row)
         self._sync_submit_button_state()
 
         layout.addStretch(1)
@@ -302,12 +316,22 @@ class OrderImageryDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(ScrollBarAsNeeded)
         conf_layout.addWidget(scroll)
-        done_btn = QPushButton("Close")
-        done_btn.clicked.connect(self.close)
+        done_btn = QPushButton("Back to Pack" if self._embedded else "Close")
+        done_btn.clicked.connect(self._on_back)
         conf_layout.addWidget(done_btn)
         self.stacked_widget.addWidget(confirmation_page)
 
         main_layout.addWidget(self.stacked_widget)
+
+    def _on_back(self):
+        """Return to the FieldWatch Pack landing page (or hide if standalone)."""
+        if self._pack_dialog is not None:
+            from .vec_plugin_dialog import _PAGE_LANDING
+
+            self.stacked_widget.setCurrentIndex(0)
+            self._pack_dialog._show_page(_PAGE_LANDING)
+            return
+        self.close()
 
     def _setup_canvas(self):
         """Set embedded canvas to a universal basemap (Esri World Imagery) and default extent."""
